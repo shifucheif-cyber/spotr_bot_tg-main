@@ -15,6 +15,7 @@ from google.genai import types as genai_types
 from groq import Client as GroqClient, GroqError
 
 from data_router import get_match_data
+from services.match_finder import check_match_clarification, format_match_confirmation
 
 # --- LOAD ENV ---
 load_dotenv()
@@ -141,15 +142,16 @@ else:
     logging.info("Groq base URL: %s", groq_client.base_url)
 
 
-def generate_with_groq(contents: str) -> str:
+def generate_with_groq(contents: str, discipline: str = "киберспорт") -> str:
     try:
+        system_prompt = get_discipline_prompt(discipline)
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": contents},
             ],
-            max_completion_tokens=1024,
+            max_completion_tokens=512,  # Уменьшено с 1024 для избежания ошибок Telegram
             temperature=0.2,
         )
         if not response.choices:
@@ -170,13 +172,14 @@ def generate_with_groq(contents: str) -> str:
                     continue
                 try:
                     logging.warning("Groq model %s decommissioned; trying fallback %s", GROQ_MODEL, model)
+                    system_prompt = get_discipline_prompt(discipline)
                     response = groq_client.chat.completions.create(
                         model=model,
                         messages=[
-                            {"role": "system", "content": SYSTEM_INSTRUCTION},
+                            {"role": "system", "content": system_prompt},
                             {"role": "user", "content": contents},
                         ],
-                        max_completion_tokens=1024,
+                        max_completion_tokens=512,
                         temperature=0.2,
                     )
                     if not response.choices:
@@ -188,15 +191,148 @@ def generate_with_groq(contents: str) -> str:
         raise
 
 
-def generate_content(contents: str) -> str:
+def generate_content(contents: str, discipline: str = "киберспорт") -> str:
     if LLM_PROVIDER == "groq":
-        return generate_with_groq(contents)
+        return generate_with_groq(contents, discipline)
     return generate_with_google(contents)
 
 
 logging.info("LLM provider: %s", LLM_PROVIDER)
 
-# --- SYSTEM PROMPT ---
+# --- OPTIMIZED SYSTEM PROMPTS BY DISCIPLINE ---
+DISCIPLINE_PROMPTS = {
+    "киберспорт": """Ты - профессиональный аналитик киберспортивных матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- рейтингах и форме команд  
+- истории личных встреч
+- составе и подготовке
+- картах и стратегиях
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "cs2": """Ты - профессиональный аналитик Counter-Strike 2 матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- рейтингах HLTV и форме команд на разных картах
+- истории личных встреч и победном проценте
+- составе и ролях игроков
+- пуле карт и тактике
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "lol": """Ты - профессиональный аналитик League of Legends матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- рейтингах LEC/LPL/Worlds и форме команды
+- мета-чемпионах текущего патча  
+- составе и специализации игроков по ролям
+- истории встреч между командами
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "dota2": """Ты - профессиональный аналитик Dota 2 матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- винрейтах героев в текущем патче
+- истории встреч между командами
+- составе и специализации (carry/mid/support)
+- недавних турнирах и форме
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "valorant": """Ты - профессиональный аналитик Valorant матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- форме команды и ведущих игроков
+- картах и специализации по агентам
+- истории встреч
+- недавних турнирах
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "футбол": """Ты - профессиональный аналитик футбольных матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- форме команд и составе
+- травмах и отсутствиях
+- домашнем/выездном преимуществе
+- истории личных встреч
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "теннис": """Ты - профессиональный аналитик теннисных матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- рейтингах WTA/ATP
+- истории личных встреч (H2H)
+- покрытии и условиях
+- текущей форме игроков
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "баскетбол": """Ты - профессиональный аналитик баскетбольных матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- составе и скамейке
+- темпе и защите
+- истории матчей между командами
+- травмах ключевых игроков
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "хоккей": """Ты - профессиональный аналитик хоккейных матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- форме вратарей и команд
+- домашнем/выездном преимуществе
+- травмах и ротации лучших игроков
+- спецбригадах и последних результатах
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "мма/бокс": """Ты - профессиональный аналитик боевых видов спорта.
+Анализируй ТОЛЬКО указанный поединок, используя ПОЛУЧЕННые данные о:
+- рекордах и истории боев
+- стиле и технике бойцов
+- антропометрии и весогонке
+- формах и мотивации
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "волейбол": """Ты - профессиональный аналитик волейбольных матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- рейтингах и составе команд
+- эффективности приема и атаки
+- домашнем/выездном преимуществе
+- последних результатах
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "настольный теннис": """Ты - профессиональный аналитик настольного тенниса.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- рейтингах игроков
+- истории личных встреч
+- стиле игры и технике
+- текущей форме и последних результатах
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+}
+
+def get_discipline_prompt(discipline: str) -> str:
+    """Получает оптимизированный prompt для дисциплины"""
+    from services.match_finder import normalize_discipline
+    
+    # Если это formato "киберспорт: CS2", извлечем "cs2"
+    if ":" in discipline:
+        parts = discipline.split(":")
+        discipline = parts[1].strip().lower()
+    
+    norm_disc = normalize_discipline(discipline).lower()
+    
+    # Пытаемся получить по нормализованному названию
+    if norm_disc in DISCIPLINE_PROMPTS:
+        return DISCIPLINE_PROMPTS[norm_disc]
+    
+    # Пытаемся получить по исходному
+    if discipline in DISCIPLINE_PROMPTS:
+        return DISCIPLINE_PROMPTS[discipline]
+    
+    # Fallback
+    return DISCIPLINE_PROMPTS.get("киберспорт")
+
+# --- SYSTEM PROMPT (DEPRECATED - используем DISCIPLINE_PROMPTS) ---
 SYSTEM_INSTRUCTION = """
 Ты — элитный спортивный аналитик.
 
@@ -293,8 +429,31 @@ MMA/Бокс:
 # --- FSM ---
 class OrderAnalysis(StatesGroup):
     waiting_discipline = State()
+    waiting_subdiscipline = State()  # ДЛЯ КИБЕРСПОРТА: выбор конкретной игры
     waiting_match = State()
     waiting_date = State()
+    confirming_match = State()
+
+
+# --- ДИСЦИПЛИНЫ С СУБКАТЕГОРИЯМИ ---
+DISCIPLINE_HIERARCHY = {
+    "киберспорт": {
+        "has_subdisciplines": True,
+        "options": {
+            "cs2": "Counter-Strike 2",
+            "lol": "League of Legends", 
+            "dota2": "Dota 2",
+            "valorant": "Valorant"
+        }
+    },
+    "футбол": {"has_subdisciplines": False},
+    "хоккей": {"has_subdisciplines": False},
+    "баскетбол": {"has_subdisciplines": False},
+    "теннис": {"has_subdisciplines": False},
+    "настольный теннис": {"has_subdisciplines": False},
+    "мма/бокс": {"has_subdisciplines": False},
+    "волейбол": {"has_subdisciplines": False},
+}
 
 # --- HANDLERS ---
 @dp.message(Command("start"))
@@ -313,14 +472,61 @@ async def start(message: types.Message, state: FSMContext):
 
 @dp.message(OrderAnalysis.waiting_discipline)
 async def set_discipline(message: types.Message, state: FSMContext):
-    await state.update_data(discipline=message.text)
+    discipline = message.text.strip()
+    await state.update_data(discipline=discipline)
 
-    await message.answer(
-        "Введите матч (пример: Team A vs Team B):",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+    # Проверяем, есть ли субдисциплины
+    if discipline in DISCIPLINE_HIERARCHY and DISCIPLINE_HIERARCHY[discipline].get("has_subdisciplines"):
+        # Показываем меню субдисциплин
+        subdisbut = DISCIPLINE_HIERARCHY[discipline]["options"]
+        kb = []
+        for key, label in subdisbut.items():
+            kb.append([types.KeyboardButton(text=label)])
+        
+        keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+        await message.answer(
+            f"📺 Выбран: {discipline}\n\nТеперь выберите конкретную игру:",
+            reply_markup=keyboard
+        )
+        await state.set_state(OrderAnalysis.waiting_subdiscipline)
+    else:
+        # Нет субдисциплин, сразу к матчу
+        await message.answer(
+            "Введите матч (пример: Team A vs Team B):",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.set_state(OrderAnalysis.waiting_match)
 
-    await state.set_state(OrderAnalysis.waiting_match)
+
+@dp.message(OrderAnalysis.waiting_subdiscipline)
+async def set_subdiscipline(message: types.Message, state: FSMContext):
+    """Обработчик выбора субдисциплины (для киберспорта)"""
+    data = await state.get_data()
+    subdiscipline_label = message.text.strip()
+    
+    # Найдем ключ по лейблу
+    discipline = data.get('discipline', 'киберспорт')
+    subdiscipline_key = None
+    
+    if discipline in DISCIPLINE_HIERARCHY:
+        options = DISCIPLINE_HIERARCHY[discipline].get("options", {})
+        for key, label in options.items():
+            if label == subdiscipline_label:
+                subdiscipline_key = key
+                break
+    
+    if subdiscipline_key:
+        # Сохраняем полную дисциплину
+        full_discipline = f"{discipline}: {subdiscipline_label}"
+        await state.update_data(subdiscipline=subdiscipline_key, full_discipline=full_discipline)
+        
+        await message.answer(
+            f"🎮 Дисциплина: {subdiscipline_label}\n\nВведите матч (пример: Team A vs Team B):",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.set_state(OrderAnalysis.waiting_match)
+    else:
+        await message.answer("Пожалуйста, выберите из предложенных вариантов")
 
 def parse_match_sides(match_text: str) -> list[str]:
     parts = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_text, flags=re.I)
@@ -331,11 +537,35 @@ def build_annotation_block(match_text: str) -> str:
     sides = parse_match_sides(match_text)
     if len(sides) == 2:
         return (
-            "Аннотации по сторонам:\n"
-            f"- {sides[0]}: краткая аннотация команды/игрока, стиль, текущая форма и ключевые риски.\n"
-            f"- {sides[1]}: краткая аннотация команды/игрока, стиль, текущая форма и ключевые риски."
+            "Данные матча:\n"
+            f"1️⃣ {sides[0]}\n"
+            f"2️⃣ {sides[1]}"
         )
     return ""
+
+
+def split_long_message(text: str, max_length: int = 4000) -> list[str]:
+    """Разбивает большое сообщение на части (лимит Telegram - 4096)"""
+    if len(text) <= max_length:
+        return [text]
+    
+    messages = []
+    current = ""
+    
+    # Разбиваем по абзацам
+    paragraphs = text.split("\n\n")
+    
+    for para in paragraphs:
+        if len(current) + len(para) + 2 > max_length:
+            if current:
+                messages.append(current)
+                current = ""
+        current += para + "\n\n"
+    
+    if current:
+        messages.append(current)
+    
+    return [msg.strip() for msg in messages if msg.strip()]
 
 
 @dp.message(OrderAnalysis.waiting_match)
@@ -355,31 +585,117 @@ async def set_match(message: types.Message, state: FSMContext):
     await state.set_state(OrderAnalysis.waiting_date)
 
 @dp.message(OrderAnalysis.waiting_date)
-async def final_step(message: types.Message, state: FSMContext):
+async def check_match(message: types.Message, state: FSMContext):
+    """Проверяет матч перед началом анализа (дисциплина и дата)"""
     data = await state.get_data()
+    date_text = message.text.strip()
+    
+    await state.update_data(date=date_text)
+    
+    # Используем full_discipline если есть (с субдисциплиной), иначе обычную
+    discipline = data.get('full_discipline') or data.get('discipline', '')
+    
+    # 🔍 Проверяем матч
+    clarification = check_match_clarification(
+        match_text=data['match'],
+        date_text=date_text,
+        user_discipline=discipline
+    )
+    
+    if clarification and clarification.get('needs_confirmation'):
+        # Нужно уточнение
+        confirmation_msg = format_match_confirmation(clarification)
+        await message.answer(confirmation_msg)
+        
+        # Сохраняем найденный матч в контексте
+        if clarification.get('match'):
+            await state.update_data(
+                found_match=clarification['match'],
+                clarification_type=clarification['status']
+            )
+        
+        await state.set_state(OrderAnalysis.confirming_match)
+    elif clarification and not clarification.get('needs_confirmation'):
+        # Матч в порядке, начинаем анализ
+        await start_analysis(message, state)
+    else:
+        # Матч не найден в базе, но разрешаем анализ с доступными данными
+        from services.match_finder import create_fallback_match_data
+        
+        fallback_data = create_fallback_match_data(
+            match_text=data['match'],
+            date_text=date_text,
+            discipline=discipline
+        )
+        
+        if fallback_data:
+            await state.update_data(found_match=fallback_data)
+            await message.answer(
+                f"📊 Анализирую матч: **{fallback_data['home']}** vs **{fallback_data['away']}** ({fallback_data['date']})"
+            )
+            await asyncio.sleep(0.5)
+            await start_analysis(message, state)
+        else:
+            await message.answer(
+                "❌ Не удалось разобрать данные матча. Пожалуйста, укажите матч в формате 'Team A vs Team B'"
+            )
+            await state.clear()
 
-    full_query = f"{data['match']} {data['discipline']} {message.text}"
 
+@dp.message(OrderAnalysis.confirming_match)
+async def confirm_match(message: types.Message, state: FSMContext):
+    """Обработчик подтверждения матча"""
+    user_response = message.text.strip().lower()
+    data = await state.get_data()
+    
+    if user_response in ["да", "yes", "y", "д", "ок", "ok"]:
+        # Пользователь согласен, начинаем анализ
+        await start_analysis(message, state)
+    elif user_response in ["нет", "no", "n", "н"]:
+        # Пользователь отказался
+        await message.answer("❌ Анализ отменён. Попробуйте снова командой /start")
+        await state.clear()
+    else:
+        await message.answer("Пожалуйста, ответьте 'Да' или 'Нет'")
+
+
+async def start_analysis(message: types.Message, state: FSMContext):
+    """Запускает анализ матча"""
+    data = await state.get_data()
+    
     status = await message.answer("🔎 Анализирую матч...")
-
+    
     try:
+        # Используем full_discipline если есть (с субдисциплиной)
+        discipline = data.get('full_discipline') or data.get('discipline', 'киберспорт')
+        
         # 🔥 получаем структурированные данные
         search_data = await get_match_data(
             data['match'],
-            data['discipline']
+            discipline
         )
 
         annotation_block = build_annotation_block(data['match'])
 
-        # 🔥 генерим ответ (БЕЗ config!)
+        # 🔥 генерим ответ с оптимизированным system prompt
         response_text = generate_content(
-            f"{SYSTEM_INSTRUCTION}\n\n{search_data}\n\n{annotation_block}"
+            f"{search_data}\n\n{annotation_block}",
+            discipline=discipline
         )
 
         await status.delete()
 
         if response_text:
-            await message.answer(response_text, parse_mode="Markdown")
+            # Разбиваем большие сообщения
+            parts = split_long_message(response_text)
+            for i, part in enumerate(parts):
+                try:
+                    await message.answer(part, parse_mode="Markdown")
+                    if i < len(parts) - 1:
+                        await asyncio.sleep(0.5)  # Небольшая задержка между частями
+                except Exception as e:
+                    logging.error(f"Error sending message part {i+1}: {e}")
+                    await message.answer(f"⚠️ Ошибка отправки части {i+1}")
         else:
             await message.answer("⚠️ Нет ответа от модели")
 
