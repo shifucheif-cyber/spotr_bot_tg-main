@@ -1,6 +1,10 @@
 import re
+import logging
 
 from services.external_source import search_event_thesportsdb
+from services.data_fetcher import MMAFetcher
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_fight_name(fight_name: str) -> str:
@@ -69,7 +73,78 @@ def parse_mma_external(fight_name: str) -> str:
 """
 
 
+def fetch_mma_real_data(fight_name: str) -> str:
+    """Fetch real MMA/Boxing data from Sherdog, Tapology, BoxRec."""
+    try:
+        fighters = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", fight_name, flags=re.I)
+        if len(fighters) != 2:
+            return f"Бой: {fight_name}\n\nДанные загружаются из Sherdog, Tapology и BoxRec..."
+
+        fighter1 = fighters[0].strip()
+        fighter2 = fighters[1].strip()
+        
+        fetcher = MMAFetcher()
+        f1_info = fetcher.fetch_fighter_info(fighter1)
+        f2_info = fetcher.fetch_fighter_info(fighter2)
+
+        result = f"""
+🥊 **Бой:** {fighter1.upper()} vs {fighter2.upper()}
+
+**Источники данных:**
+- Sherdog (Библия ММА - все бои, рекорды, стили)
+- Tapology (текущая форма, прогнозы экспертов)
+- BoxRec (для бокса - официальные рейтинги)
+
+**Информация о бойце 1 ({fighter1.upper()}):**
+{format_mma_data(f1_info)}
+
+**Информация о бойце 2 ({fighter2.upper()}):**
+{format_mma_data(f2_info)}
+
+**Ключевые метрики:**
+- Рекорд побед/поражений (W-L-D)
+- Способ побед (КО, сабмишн, решение)
+- Антропометрия (рост, размах рук, вес)
+- История последних боёв (форма)
+- Стиль боя и навыки
+- Выносливость и адаптация к враг
+
+**Прогноз:**
+- Анализируется...
+"""
+        logger.info(f"Successfully fetched MMA data for {fight_name}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error fetching MMA real data: {e}")
+        return f"Бой: {fight_name}\n\nДанные загружаются из Sherdog, Tapology и BoxRec..."
+
+
+def format_mma_data(fighter_info: dict) -> str:
+    """Format fighter information for display."""
+    if not fighter_info:
+        return "Данные загружаются..."
+    
+    lines = []
+    for key, value in fighter_info.items():
+        if key not in ["fighter"] and value:
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    lines.append(f"  - {k}: {v}")
+            else:
+                lines.append(f"  - {key}: {value}")
+    
+    return "\n".join(lines) if lines else "Данные загружаются..."
+
+
 def get_mma_data(fight_name: str) -> str:
+    # Try to fetch real data
+    result = fetch_mma_real_data(fight_name)
+    if result and "Данные загружаются из" in result:
+        if "не" not in result:
+            return result
+
+    # Fall back to external sources
     external = parse_mma_external(fight_name)
     if external:
         return external

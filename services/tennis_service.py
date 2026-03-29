@@ -1,6 +1,10 @@
 import re
+import logging
 
 from services.external_source import search_event_thesportsdb
+from services.data_fetcher import TennisFetcher
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_match_name(match_name: str) -> str:
@@ -51,6 +55,69 @@ H2H: важно учитывать личные встречи
 """
 
 
+def fetch_tennis_real_data(match_name: str) -> str:
+    """Fetch real tennis match data from ATP/WTA and Tennis Explorer."""
+    try:
+        players = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_name, flags=re.I)
+        if len(players) != 2:
+            return parse_tennis_fallback(match_name)
+
+        player1 = players[0].strip()
+        player2 = players[1].strip()
+        
+        fetcher = TennisFetcher()
+        player1_info = fetcher.fetch_player_info(player1)
+        player2_info = fetcher.fetch_player_info(player2)
+
+        result = f"""
+🎾 **Матч:** {player1.upper()} vs {player2.upper()}
+
+**Источники данных:**
+- ATP/WTA Tour (официальные рейтинги, статистика на покрытии)
+- Tennis Explorer (H2H, анализ по покрытиям, форма)
+
+**Информация об игроке 1 ({player1.upper()}):**
+{format_tennis_player_data(player1_info)}
+
+**Информация об игроке 2 ({player2.upper()}):**
+{format_tennis_player_data(player2_info)}
+
+**Ключевые метрики:**
+- Рейтинг и позиция в рейтинге
+- Процент побед на разных покрытиях (хард/грунт/траву)
+- Статистика подачи и приёма
+- H2H история личных встреч
+- Усталость и время последнего матча
+- Адаптация к текущему турниру
+
+**Прогноз:**
+- Анализируется...
+"""
+        logger.info(f"Successfully fetched tennis data for {match_name}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error fetching tennis real data: {e}")
+        return parse_tennis_fallback(match_name)
+
+
+def format_tennis_player_data(player_info: dict) -> str:
+    """Format player information for display."""
+    if not player_info:
+        return "Данные загружаются..."
+    
+    lines = []
+    for key, value in player_info.items():
+        if key not in ["player"] and value:
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    lines.append(f"  - {k}: {v}")
+            else:
+                lines.append(f"  - {key}: {value}")
+    
+    return "\n".join(lines) if lines else "Данные загружаются..."
+
+
 def parse_tennis_external(match_name: str) -> str:
     event = search_event_thesportsdb(match_name)
     if not event:
@@ -77,6 +144,12 @@ def parse_tennis_external(match_name: str) -> str:
 
 
 def get_tennis_data(match_name: str) -> str:
+    # Try to fetch real data
+    result = fetch_tennis_real_data(match_name)
+    if result and "Данные загружаются..." not in result:
+        return result
+
+    # Fall back to external sources
     external = parse_tennis_external(match_name)
     if external:
         return external

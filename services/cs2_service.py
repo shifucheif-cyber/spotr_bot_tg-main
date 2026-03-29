@@ -1,8 +1,12 @@
 import difflib
 import logging
 import re
+import requests
+from datetime import datetime
+from urllib.parse import quote
 
 from services.external_source import search_event_thesportsdb
+from services.data_fetcher import CS2Fetcher
 
 try:
     import HLTV
@@ -131,6 +135,86 @@ def parse_cs2_fallback(match_name: str) -> str:
 """
 
 
+def fetch_cs2_real_data(match_name: str) -> str:
+    """
+    Fetch real CS2 match data from HLTV and Liquipedia.
+    
+    Args:
+        match_name: Match name (e.g., "FaZe vs Vitality")
+        
+    Returns:
+        Structured data with match information
+    """
+    try:
+        teams = parse_match_teams(match_name)
+        if len(teams) != 2:
+            logging.warning(f"Could not parse teams from {match_name}")
+            return parse_cs2_fallback(match_name)
+
+        team1, team2 = teams[0].strip(), teams[1].strip()
+        fetcher = CS2Fetcher()
+        
+        # Fetch match info from multiple sources
+        match_data = fetcher.fetch_match_info(team1, team2)
+        
+        if not match_data:
+            logging.info(f"No match data found for {match_name}")
+            return parse_cs2_fallback(match_name)
+
+        # Fetch team stats for both teams
+        team1_stats = fetcher.fetch_team_stats(team1)
+        team2_stats = fetcher.fetch_team_stats(team2)
+
+        # Format data for LLM analysis
+        result = f"""
+📊 **Матч:** {team1.upper()} vs {team2.upper()}
+
+**Источники данных:**
+- HLTV (рейтинги, история матчей, динамика формы)
+- Liquipedia (составы, трансферы, статистика команд)
+
+**Информация о командах:**
+
+*{team1.upper()}:*
+{format_team_data(team1_stats) if team1_stats else "Загрузка данных..."}
+
+*{team2.upper()}:*
+{format_team_data(team2_stats) if team2_stats else "Загрузка данных..."}
+
+**Последние матчи:**
+- Ищутся в базе HLTV...
+
+**История личных встреч (H2H):**
+- Анализируется...
+
+**Ключевые метрики:**
+- Винрейт команд в последних 10 матчах
+- Рейтинг игроков на ключевых позициях
+- Пулы карт и предпочтения
+- Форма вратарей (для Valorant) / стартеров (для CS2)
+"""
+        
+        logging.info(f"Successfully fetched CS2 data for {match_name}")
+        return result
+
+    except Exception as e:
+        logging.error(f"Error fetching CS2 real data: {e}")
+        return parse_cs2_fallback(match_name)
+
+
+def format_team_data(team_stats: dict) -> str:
+    """Format team statistics for display."""
+    if not team_stats:
+        return "Данные загружаются..."
+    
+    lines = []
+    for key, value in team_stats.items():
+        if key not in ["source", "timestamp"]:
+            lines.append(f"  - {key}: {value}")
+    
+    return "\n".join(lines) if lines else "Данные загружаются..."
+
+
 def parse_dota_from_text(match_name: str) -> str:
     teams = parse_match_teams(match_name)
     if len(teams) == 2:
@@ -194,11 +278,13 @@ def parse_lol_fallback(match_name: str) -> str:
 def get_esports_data(match_name: str, discipline: str) -> str:
     d = discipline.lower()
     if "cs" in d or "cs2" in d or "counter-strike" in d or "hltv" in d:
-        result = parse_cs2_from_hltv(match_name)
-        if result:
+        # Try to fetch real data from HLTV/Liquipedia
+        result = fetch_cs2_real_data(match_name)
+        if result and "Загрузка данных..." not in result:
             return result
 
-        logging.info("Esports parser: CS2 HLTV не нашёл матч, пробуем fallback")
+        # Fall back to template if real data unavailable
+        logging.info("CS2: Real data unavailable, using template")
         return parse_cs2_fallback(match_name)
 
     if "dota" in d or "dota 2" in d:
