@@ -1,0 +1,9 @@
+aiogram
+google-genai
+groq
+hltv
+python-dotenv
+requests
+beautifulsoup4
+lxml
+cloudscraper
