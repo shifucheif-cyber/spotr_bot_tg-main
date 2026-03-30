@@ -1,131 +1,120 @@
-"""Betting recommendation calculator based on probability thresholds"""
+﻿"""Betting recommendation calculator using Kelly Criterion and Value Betting"""
 import re
+import json
 
 
 def extract_probability(llm_response: str) -> float | None:
     """
-    Extracts probability percentage from LLM response.
-    
-    Looks for patterns like:
-    - "Вероятность победы (1-я команда): 75%"
-    - "P = 75%"
-    - "вероятность: 75%"
-    - Any number followed by %
+    Extracts probability percentage from LLM response using fallback regex patterns.
     """
-    # Try pattern: "Вероятность ... : X%"
     match = re.search(r'Вероятность[^:]*:\s*(\d+(?:[.,]\d+)?)\s*%', llm_response, re.IGNORECASE)
-    if match:
-        return float(match.group(1).replace(',', '.'))
+    if match: return float(match.group(1).replace(',', '.'))
     
-    # Try pattern: "P = X%"
     match = re.search(r'[Пп]\s*[=:]\s*(\d+(?:[.,]\d+)?)\s*%', llm_response)
-    if match:
-        return float(match.group(1).replace(',', '.'))
+    if match: return float(match.group(1).replace(',', '.'))
     
-    # Try pattern: "вероятность: X%"
     match = re.search(r'вероятность[^:]*:\s*(\d+(?:[.,]\d+)?)\s*%', llm_response, re.IGNORECASE)
-    if match:
-        return float(match.group(1).replace(',', '.'))
+    if match: return float(match.group(1).replace(',', '.'))
     
-    # Last resort: find any percentage in the text
     match = re.search(r'(\d+(?:[.,]\d+)?)\s*%', llm_response)
-    if match:
-        return float(match.group(1).replace(',', '.'))
+    if match: return float(match.group(1).replace(',', '.'))
     
     return None
 
 
-def calculate_stake_percentage(probability: float) -> int | None:
+def extract_betting_data(llm_response: str) -> dict:
     """
-    Calculates recommended stake percentage based on probability threshold.
-    
-    Formula:
-    - P > 80% → 6% of bankroll (Ultra-confidence, "Sure thing")
-    - 66% ≤ P ≤ 80% → 3% of bankroll (High probability)
-    - 55% ≤ P ≤ 65% → 1% of bankroll (Risky bet/Value bet)
-    - P < 55% → None (Don't bet, too uncertain)
-    
-    Args:
-        probability: Probability percentage (0-100)
-    
-    Returns:
-        Stake percentage (1, 3, 6) or None if skip recommendation
+    Searches for a JSON block within the response text.
+    Falls back to existing regex for probability ONLY if JSON loading fails.
     """
-    if probability > 80:
-        return 6
-    elif 66 <= probability <= 80:
-        return 3
-    elif 55 <= probability <= 65:
-        return 1
-    else:
-        return None
+    probability = None
+    odds = None
+    
+    # Try finding JSON block
+    match = re.search(r'```json\s*(\{.*?\})\s*```', llm_response, re.DOTALL | re.IGNORECASE)
+    if not match:
+        match = re.search(r'(\{.*?\})', llm_response, re.DOTALL)
+        
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            prob_val = data.get("probability")
+            odds_val = data.get("odds")
+            if prob_val is not None:
+                probability = float(prob_val)
+            if odds_val is not None:
+                odds = float(odds_val)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+            
+    # Fallback to regex for probability
+    if probability is None:
+        probability = extract_probability(llm_response)
+        
+    return {"probability": probability, "odds": odds}
 
 
-def format_stake_recommendation(probability: float, stake_percent: int | None) -> str:
+def calculate_value_bet(probability: float, odds: float | None = None) -> dict:
     """
-    Formats stake recommendation for user display.
-    
-    Args:
-        probability: Probability percentage
-        stake_percent: Recommended stake percentage or None
-    
-    Returns:
-        Formatted recommendation string
+    Calculates value bet metrics and Kelly criterion fraction.
     """
-    if stake_percent is None:
-        return (
-            f"⚠️ **РЕКОМЕНДАЦИЯ:** Вероятность {probability:.0f}% — "
-            f"**ПРОПУСТИТЬ СОБЫТИЕ** (слишком высокая неопределённость)"
-        )
+    if probability <= 0 or probability >= 100:
+        return {"recommendation": "Недопустимая вероятность", "stake_percent": "0"}
+        
+    fair_odds = 100 / probability
     
-    confidence_level = ""
-    if probability > 80:
-        confidence_level = "Ультра-уверенность"
-    elif 66 <= probability <= 80:
-        confidence_level = "Высокая вероятность"
+    if odds is None:
+        min_profitable_odds = fair_odds * 1.05
+        return {
+            "recommendation": f"⚠️ Ищите коэффициент строго > {min_profitable_odds:.2f} (с учетом маржи). Справедливый кэф: {fair_odds:.2f}.",
+            "stake_percent": f"3% (ПРИ кэфе > {min_profitable_odds:.2f})"
+        }
+        
+    if odds <= 1:
+        return {"recommendation": "Недопустимый коэффициент", "stake_percent": "0"}
+        
+    edge = (probability / 100 * odds) - 1
+    
+    if edge > 0:
+        # Kelly Criterion
+        f = edge / (odds - 1)
+        # Fractional Kelly (1/4 to represent safe bankroll management)
+        f_safe = f * 0.25 
+        stake_percent = min(max(f_safe * 100, 0.5), 10)  # Clamp between 0.5% and 10% for safety
+        return {
+            "recommendation": f"✅ Валуй найден! Перевес: {edge*100:.1f}%. Справедливый кэф: {fair_odds:.2f}.",
+            "stake_percent": f"{stake_percent:.1f}% от банка"
+        }
     else:
-        confidence_level = "Рискованно/Валуй"
-    
-    return (
-        f"💰 **РЕКОМЕНДАЦИЯ:** {stake_percent}% от вашего банка "
-        f"(вероятность {probability:.0f}% = {confidence_level})"
-    )
+        return {
+            "recommendation": f"⛔ Пропуск. Перевес отрицательный: {edge*100:.1f}%. Справедливый кэф: {fair_odds:.2f}.",
+            "stake_percent": "ПРОПУСК"
+        }
 
 
 def get_bet_recommendation(llm_response: str) -> dict:
     """
-    Main function: extracts probability from LLM response and calculates recommendation.
-    Enforced structure: returns a dict with explicit fields, not a tuple.
-    
-    Args:
-        llm_response: Text response from LLM
-    
-    Returns:
-        Dict with fields:
-        - probability: float or None
-        - stake_percent: int or None (6, 3, 1)
-        - recommendation: str (formatted text)
-        - status: "success" or "invalid"
+    Main function: extracts data and calculates bet recommendations.
     """
-    probability = extract_probability(llm_response)
+    data = extract_betting_data(llm_response)
+    probability = data["probability"]
+    odds = data["odds"]
     
-    if probability is None:
+    if probability is None or probability == 0:
         return {
             "probability": None,
             "stake_percent": None,
-            "recommendation": "Вероятность не указана",
+            "recommendation": "Вероятность не определена (исход не найден)",
             "status": "invalid",
         }
-    
-    # Clamp probability to 0-100%
+        
     probability = max(0, min(100, probability))
-    
-    stake_percent = calculate_stake_percentage(probability)
-    recommendation = format_stake_recommendation(probability, stake_percent)
+    value_data = calculate_value_bet(probability, odds)
     
     return {
         "probability": probability,
-        "stake_percent": stake_percent,
-        "recommendation": recommendation,
+        "stake_percent": value_data["stake_percent"],
+        "recommendation": value_data["recommendation"],
         "status": "success",
     }
+
