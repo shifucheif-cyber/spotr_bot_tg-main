@@ -12,11 +12,19 @@ def test_source_priority() -> bool:
             ["premierliga.ru", "soccer.ru", "sports.ru", "rustat.pro"],
         ),
         (
+            _get_sites_for_query("football", "Zenit", "CSKA")[:4],
+            ["premierliga.ru", "soccer.ru", "sports.ru", "rustat.pro"],
+        ),
+        (
             _get_sites_for_query("football", "Спартак", "РПЛ 2026")[:4],
             ["premierliga.ru", "soccer.ru", "sports.ru", "rustat.pro"],
         ),
         (
             _get_sites_for_query("hockey", "Авангард", "КХЛ плей-офф")[:3],
+            ["khl.ru", "allhockey.ru", "r-hockey.ru"],
+        ),
+        (
+            _get_sites_for_query("hockey", "Avangard", "Ak Bars")[:3],
             ["khl.ru", "allhockey.ru", "r-hockey.ru"],
         ),
         (
@@ -28,12 +36,32 @@ def test_source_priority() -> bool:
             ["vtb-league.com", "basketball-reference.com"],
         ),
         (
+            _get_sites_for_query("basketball", "Zenit", "CSKA")[:2],
+            ["vtb-league.com", "basketball-reference.com"],
+        ),
+        (
             _get_sites_for_query("cs2", "Team Spirit", "СНГ квалификация")[:2],
             ["cyber.sports.ru", "cybersport.ru"],
         ),
         (
+            _get_sites_for_query("cs2", "Team Spirit", "Virtus.pro")[:2],
+            ["cyber.sports.ru", "cybersport.ru"],
+        ),
+        (
+            _get_sites_for_query("tennis", "Medvedev", "Rublev")[:2],
+            ["rtt-tennis.ru", "tennisexplorer.com"],
+        ),
+        (
+            _get_sites_for_query("mma", "Makhachev", "Petr Yan")[:2],
+            ["aca-mma.com", "fighttime.ru"],
+        ),
+        (
             _get_sites_for_query("football", "Manchester United", "Premier League")[:2],
             ["whoscored.com", "transfermarkt.com"],
+        ),
+        (
+            _get_sites_for_query("cs2", "Team Spirit", "G2")[:2],
+            ["hltv.org", "liquipedia.net"],
         ),
     ]
 

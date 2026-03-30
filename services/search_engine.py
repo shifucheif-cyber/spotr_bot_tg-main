@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from services.name_normalizer import expand_context_terms, get_search_variants
+from services.name_normalizer import expand_context_terms, get_search_variants, normalize_entity_name, transliterate_text
 try:
     from ddgs import DDGS
 except ImportError:
@@ -35,6 +35,64 @@ RUSSIAN_CONTEXT_HINTS = {
     "рпл", "фнл", "кубок россии", "кхл", "вхл", "мхл", "единая лига втб",
     "суперлига", "вфв", "aca", "rcc", "fight nights", "рtt", "ртт", "снг",
     "восточная европа", "россия", "russia", "russian",
+}
+RUSSIAN_PARTICIPANT_HINTS = {
+    "football": {
+        "зенит", "спартак", "цска", "локомотив", "динамо москва", "краснодар", "ростов",
+        "рубин", "ахмат", "крылья советов", "оренбург", "факел", "пари нн", "урал", "сочи",
+        "zenit", "spartak", "cska", "lokomotiv", "lokomotiv moscow", "dynamo moscow",
+        "dinamo moscow", "krasnodar", "rostov", "rubin", "akhmat", "krylia sovetov",
+        "orenburg", "fakel", "pari nn", "ural", "sochi",
+    },
+    "hockey": {
+        "ска", "цска", "спартак", "динамо москва", "авангард", "ак барс", "салават юлаев",
+        "локомотив", "металлург магнитогорск", "трактор", "северсталь", "торпедо нн", "автомобилист",
+        "ska", "cska", "spartak", "dynamo moscow", "dinamo moscow", "avangard", "ak bars",
+        "salavat yulaev", "lokomotiv yaroslavl", "metallurg magnitogorsk", "traktor", "severstal",
+        "torpedo nizhny novgorod", "avtomobilist",
+    },
+    "basketball": {
+        "зенит", "цска", "уникс", "локомотив кубань", "парма пермь", "самара", "автодор",
+        "нижний новгород", "мба", "уралмаш",
+        "zenit", "cska", "unics", "lokomotiv kuban", "parma perm", "samara", "avtodor",
+        "nizhny novgorod", "mba moscow", "uralmash",
+    },
+    "volleyball": {
+        "зенит казань", "зенит спб", "динамо москва", "локомотив новосибирск", "белогорье",
+        "зенит", "динамо", "lokomotiv novosibirsk", "belogorie", "zenit kazan", "zenit st petersburg",
+        "dynamo moscow", "zenit", "dynamo",
+    },
+    "tennis": {
+        "медведев", "рублев", "хачанов", "касаткина", "кудерметова", "андреева", "калинская",
+        "павлюченкова", "alexandrova", "medvedev", "rublev", "khachanov", "kasatkina",
+        "kudermetova", "andreeva", "kalinskaya", "pavlyuchenkova",
+    },
+    "table_tennis": {
+        "шибаев", "карташев", "сидоренко", "полина михайлова", "лилия гуракова",
+        "shibaev", "kartashev", "sidorenko", "polina mikhailova", "liliya gurakova",
+    },
+    "mma": {
+        "ислам махачев", "петр ян", "магомед анкалаев", "александр волков", "федор емельяненко",
+        "шара буллет", "makhachev", "petr yan", "ankalaev", "volkov", "emelianenko", "shara bullet",
+    },
+    "boxing": {
+        "бивол", "бетербиев", "батыргазиев", "кузямин", "dmitry bivol", "artur beterbiev",
+        "batyrgaziev", "kovalev",
+    },
+    "cs2": {
+        "team spirit", "virtus pro", "virtus.pro", "betboom", "forze", "1win", "parivision",
+        "дух", "виртус про", "бетбум",
+    },
+    "dota2": {
+        "team spirit", "betboom", "parivision", "virtus pro", "virtus.pro", "9pandas",
+        "дух", "бетбум", "виртус про",
+    },
+    "valorant": {
+        "team spirit", "forze", "1win", "дух", "форз", "1вин",
+    },
+    "lol": {
+        "unicorns of love", "virtus pro", "virtus.pro", "vega squadron", "единороги любви", "виртус про",
+    },
 }
 
 DISCIPLINE_SOURCE_CONFIG = {
@@ -164,6 +222,27 @@ def _looks_like_russian_participant(text: str) -> bool:
     return bool(re.search(r"[а-яё]", text.lower()))
 
 
+def _matches_russian_hint(text: str, discipline: str) -> bool:
+    if not text:
+        return False
+
+    normalized = normalize_entity_name(text)
+    transliterated = normalize_entity_name(transliterate_text(text))
+    haystacks = [normalized, transliterated]
+    hints = RUSSIAN_PARTICIPANT_HINTS.get(discipline, set())
+    if not hints:
+        return False
+
+    for haystack in haystacks:
+        if not haystack:
+            continue
+        for hint in hints:
+            normalized_hint = normalize_entity_name(hint)
+            if normalized_hint and normalized_hint in haystack:
+                return True
+    return False
+
+
 def _should_prefer_russian_sources(entity: str, context_terms: Optional[str], discipline: str) -> bool:
     if _looks_like_russian_context(entity, context_terms, discipline):
         return True
@@ -172,7 +251,9 @@ def _should_prefer_russian_sources(entity: str, context_terms: Optional[str], di
     if not cleaned_context:
         return False
 
-    return _looks_like_russian_participant(entity) and _looks_like_russian_participant(cleaned_context)
+    entity_is_russian = _looks_like_russian_participant(entity) or _matches_russian_hint(entity, discipline)
+    context_is_russian = _looks_like_russian_participant(cleaned_context) or _matches_russian_hint(cleaned_context, discipline)
+    return entity_is_russian and context_is_russian
 
 
 def _get_sites_for_query(discipline: str, entity: str, context_terms: Optional[str] = None) -> List[str]:
