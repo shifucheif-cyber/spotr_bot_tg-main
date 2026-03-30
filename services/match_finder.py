@@ -106,6 +106,7 @@ def parse_date(date_str: str) -> Optional[datetime]:
     # Стандартные форматы
     formats = [
         "%d.%m.%Y",
+        "%d.%m.%y",  # ✅ Добавляем 2-значный год (30.03.26)
         "%d-%m-%Y",
         "%Y-%m-%d",
         "%d.%m",
