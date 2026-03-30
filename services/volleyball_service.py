@@ -7,6 +7,17 @@ from services.data_fetcher import VolleyballFetcher
 logger = logging.getLogger(__name__)
 
 
+def has_validated_data(result: str) -> bool:
+    return bool(result) and "Валидация: validated" in result and "Подтверждено источников:" in result
+
+
+def build_context_terms(match_context: dict | None, opponent: str) -> str:
+    if not match_context:
+        return opponent
+    parts = [opponent, match_context.get("date", ""), match_context.get("league", "")]
+    return " ".join(part for part in parts if part)
+
+
 def normalize_match_name(match_name: str) -> str:
     return re.sub(r"\s+", " ", match_name.strip())
 
@@ -25,7 +36,7 @@ def parse_volleyball_from_text(match_name: str) -> str:
 - перелёты, jet lag и глубина состава
 
 Анализ:
-- WorldofVolley / Volleyball World / Flashscore помогают проверить травмы и форму
+- Volleybox помогает проверить составы, трансферы и статус лидеров
 - если связующий нестабилен, это сильно влияет на скорость атаки
 - плохой приём ухудшает атакующие комбинации
 - замены важны при длительной игре и в 4-5 сетах
@@ -75,25 +86,27 @@ def parse_volleyball_external(match_name: str) -> str:
 """
 
 
-def fetch_volleyball_real_data(match_name: str) -> str:
-    """Fetch real volleyball match data from WorldofVolley and Volleybox."""
+def fetch_volleyball_real_data(match_name: str, match_context: dict | None = None) -> str:
+    """Fetch real volleyball match data from Volleybox."""
     try:
         teams = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_name, flags=re.I)
         if len(teams) != 2:
-            return f"Матч: {match_name}\n\nДанные загружаются из WorldofVolley и Volleybox..."
+            return f"Матч: {match_name}\n\nДанные загружаются из Volleybox..."
 
         home_team = teams[0].strip()
         away_team = teams[1].strip()
+        home_context = build_context_terms(match_context, away_team)
+        away_context = build_context_terms(match_context, home_team)
         
         fetcher = VolleyballFetcher()
-        home_info = fetcher.fetch_team_info(home_team)
-        away_info = fetcher.fetch_team_info(away_team)
+        home_info = fetcher.fetch_team_info(home_team, context_terms=home_context)
+        away_info = fetcher.fetch_team_info(away_team, context_terms=away_context)
 
         result = f"""
 🏐 **Матч:** {home_team.upper()} (H) vs {away_team.upper()} (A)
 
 **Источники данных:**
-- WorldofVolley (главный мировой портал волейбола)
+- Volleybox (составы, трансферы, состояние лидеров)
 - Volleybox (база по игрокам, трансферам, результатам)
 - Volleyball World (FIVB - официальные рейтинги)
 
@@ -120,7 +133,7 @@ def fetch_volleyball_real_data(match_name: str) -> str:
 
     except Exception as e:
         logger.error(f"Error fetching volleyball real data: {e}")
-        return f"Матч: {match_name}\n\nДанные загружаются из WorldofVolley и Volleybox..."
+        return f"Матч: {match_name}\n\nДанные загружаются из Volleybox..."
 
 
 def format_volleyball_data(team_info: dict) -> str:
@@ -140,12 +153,11 @@ def format_volleyball_data(team_info: dict) -> str:
     return "\n".join(lines) if lines else "Данные загружаются..."
 
 
-def get_volleyball_data(match_name: str) -> str:
+def get_volleyball_data(match_name: str, match_context: dict | None = None) -> str:
     # Try to fetch real data
-    result = fetch_volleyball_real_data(match_name)
-    if result and "Данные загружаются из" in result:
-        if "не" not in result:
-            return result
+    result = fetch_volleyball_real_data(match_name, match_context=match_context)
+    if has_validated_data(result):
+        return result
 
     # Fall back to external sources
     external = parse_volleyball_external(match_name)

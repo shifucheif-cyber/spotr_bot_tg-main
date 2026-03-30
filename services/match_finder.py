@@ -8,6 +8,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Tuple
 
+from services.name_normalizer import normalize_entity_name, resolve_match_entities, split_match_text
+
 logger = logging.getLogger(__name__)
 
 # Маппинг названий дисциплин
@@ -55,12 +57,12 @@ UPCOMING_MATCHES = {
 
 def normalize_team_name(name: str) -> str:
     """Нормализует названия команд для сравнения"""
-    return re.sub(r"\s+", " ", name.strip().lower())
+    return normalize_entity_name(name)
 
 
 def parse_match_teams(match_text: str) -> Tuple[Optional[str], Optional[str]]:
     """Парсит два названия команд из строки"""
-    parts = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_text, flags=re.I)
+    parts = split_match_text(match_text)
     if len(parts) >= 2:
         return parts[0].strip(), parts[1].strip()
     elif len(parts) == 1:
@@ -173,8 +175,11 @@ def find_matches_by_teams(
         target_date = datetime.now()
     
     # Нормализуем названия команд
-    team1_norm = normalize_team_name(team1) if team1 else None
-    team2_norm = normalize_team_name(team2) if team2 else None
+    resolved = resolve_match_entities(team1 or "", team2 or "", discipline=discipline)
+    team1_value = resolved["team1"]["corrected"] if team1 else None
+    team2_value = resolved["team2"]["corrected"] if team2 else None
+    team1_norm = normalize_team_name(team1_value) if team1_value else None
+    team2_norm = normalize_team_name(team2_value) if team2_value else None
     
     # Если указана дисциплина, получаем соответствующие ключи спорта
     sport_keys = get_sport_keys_for_discipline(discipline) if discipline else None
@@ -368,6 +373,10 @@ def create_fallback_match_data(match_text: str, date_text: str, discipline: str)
     
     if not team1 or not team2:
         return None
+
+    resolved = resolve_match_entities(team1, team2, discipline=discipline)
+    team1 = resolved["team1"]["corrected"]
+    team2 = resolved["team2"]["corrected"]
     
     date_str = target_date.strftime("%Y-%m-%d") if target_date else "дата не указана"
     

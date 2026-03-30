@@ -7,6 +7,17 @@ from services.data_fetcher import MMAFetcher
 logger = logging.getLogger(__name__)
 
 
+def has_validated_data(result: str) -> bool:
+    return bool(result) and "Валидация: validated" in result and "Подтверждено источников:" in result
+
+
+def build_context_terms(match_context: dict | None, opponent: str) -> str:
+    if not match_context:
+        return opponent
+    parts = [opponent, match_context.get("date", ""), match_context.get("league", "")]
+    return " ".join(part for part in parts if part)
+
+
 def normalize_fight_name(fight_name: str) -> str:
     return re.sub(r"\s+", " ", fight_name.strip())
 
@@ -25,7 +36,8 @@ def parse_mma_from_text(fight_name: str) -> str:
 - последний бой, активность и травмы
 
 Анализ:
-- Sherdog / Tapology дают историю боёв и способы побед
+- Sherdog дает историю боёв и антропометрию
+- UFC Stats дает точность ударов, защиту от тейкдаунов и контроль
 - BoxRec помогает проверить рейтинг и активность боксёров
 - если борец против ударника, преимущество у борца в клинче
 - если есть разница в выносливости, это важно в поздних раундах
@@ -44,7 +56,7 @@ def parse_mma_fallback(fight_name: str) -> str:
 - последние результаты
 
 Анализ:
-- используйте Sherdog/Tapology и BoxRec для проверки истории и рейтинга
+- используйте Sherdog, UFC Stats и BoxRec для проверки истории и рейтинга
 - тренерская подготовка и восстановление после травм важны
 """
 
@@ -73,26 +85,28 @@ def parse_mma_external(fight_name: str) -> str:
 """
 
 
-def fetch_mma_real_data(fight_name: str) -> str:
-    """Fetch real MMA/Boxing data from Sherdog, Tapology, BoxRec."""
+def fetch_mma_real_data(fight_name: str, match_context: dict | None = None) -> str:
+    """Fetch real MMA/Boxing data from Sherdog, UFC Stats, and BoxRec."""
     try:
         fighters = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", fight_name, flags=re.I)
         if len(fighters) != 2:
-            return f"Бой: {fight_name}\n\nДанные загружаются из Sherdog, Tapology и BoxRec..."
+            return f"Бой: {fight_name}\n\nДанные загружаются из Sherdog, UFC Stats и BoxRec..."
 
         fighter1 = fighters[0].strip()
         fighter2 = fighters[1].strip()
+        fighter1_context = build_context_terms(match_context, fighter2)
+        fighter2_context = build_context_terms(match_context, fighter1)
         
         fetcher = MMAFetcher()
-        f1_info = fetcher.fetch_fighter_info(fighter1)
-        f2_info = fetcher.fetch_fighter_info(fighter2)
+        f1_info = fetcher.fetch_fighter_info(fighter1, context_terms=fighter1_context)
+        f2_info = fetcher.fetch_fighter_info(fighter2, context_terms=fighter2_context)
 
         result = f"""
 🥊 **Бой:** {fighter1.upper()} vs {fighter2.upper()}
 
 **Источники данных:**
-- Sherdog (Библия ММА - все бои, рекорды, стили)
-- Tapology (текущая форма, прогнозы экспертов)
+- Sherdog (все бои, рекорды, стили, антропометрия)
+- UFC Stats (точность ударов, тейкдауны, контроль)
 - BoxRec (для бокса - официальные рейтинги)
 
 **Информация о бойце 1 ({fighter1.upper()}):**
@@ -117,7 +131,7 @@ def fetch_mma_real_data(fight_name: str) -> str:
 
     except Exception as e:
         logger.error(f"Error fetching MMA real data: {e}")
-        return f"Бой: {fight_name}\n\nДанные загружаются из Sherdog, Tapology и BoxRec..."
+        return f"Бой: {fight_name}\n\nДанные загружаются из Sherdog, UFC Stats и BoxRec..."
 
 
 def format_mma_data(fighter_info: dict) -> str:
@@ -137,17 +151,16 @@ def format_mma_data(fighter_info: dict) -> str:
     return "\n".join(lines) if lines else "Данные загружаются..."
 
 
-def get_mma_data(fight_name: str, subdiscipline: str = "mma") -> str:
+def get_mma_data(fight_name: str, subdiscipline: str = "mma", match_context: dict | None = None) -> str:
     # Выбираем логику в зависимости от дисциплины (ММА или Бокс)
     if subdiscipline == "boxing":
         # TODO: В будущем добавить специфичную логику для бокса
         pass
     
     # Try to fetch real data
-    result = fetch_mma_real_data(fight_name)
-    if result and "Данные загружаются из" in result:
-        if "не" not in result:
-            return result
+    result = fetch_mma_real_data(fight_name, match_context=match_context)
+    if has_validated_data(result):
+        return result
 
     # Fall back to external sources
     external = parse_mma_external(fight_name)

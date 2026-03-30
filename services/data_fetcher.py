@@ -9,6 +9,23 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
+from services.search_engine import (
+    collect_validated_sources,
+    format_validated_report,
+    search_cs2_stats,
+    search_dota_stats,
+    search_football_stats,
+    search_lol_stats,
+    search_tennis_player,
+    search_table_tennis_player,
+    search_mma_fighter,
+    search_boxing_fighter,
+    search_basketball_team,
+    search_hockey_team,
+    search_valorant_stats,
+    search_volleyball_team
+)
+
 logger = logging.getLogger(__name__)
 
 # User agents for requests
@@ -89,6 +106,32 @@ class DataFetcher:
 
         return consolidated
 
+    def build_validated_payload(
+        self,
+        entity: str,
+        discipline: str,
+        stat_type: str,
+        entity_key: str,
+        context_terms: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        report = collect_validated_sources(
+            entity,
+            discipline,
+            stat_type,
+            min_sources=2,
+            timelimit="m",
+            context_terms=context_terms,
+        )
+        sources = ", ".join(source["source"] for source in report["validated_sources"]) or "нет"
+        return {
+            entity_key: entity,
+            "status": report["status"],
+            "validated_count": report["validated_count"],
+            "validated_sources": sources,
+            "freshness_window": report["freshness_window"],
+            "report": format_validated_report(report),
+        }
+
 
 class CS2Fetcher(DataFetcher):
     """Fetch CS2/Counter-Strike 2 data from multiple sources."""
@@ -96,7 +139,7 @@ class CS2Fetcher(DataFetcher):
     HLTV_BASE = "https://www.hltv.org"
     LIQUIPEDIA_BASE = "https://liquipedia.net/counterstrike"
 
-    def fetch_team_stats(self, team_name: str) -> Optional[Dict[str, Any]]:
+    def fetch_team_stats(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Fetch CS2 team statistics from HLTV.
         
@@ -107,22 +150,19 @@ class CS2Fetcher(DataFetcher):
             Dictionary with team stats or None
         """
         try:
-            # Search for team on HLTV
-            search_url = f"{self.HLTV_BASE}/search?query={quote(team_name)}"
-            logger.info(f"Fetching HLTV stats for {team_name} from {search_url}")
-            
-            # This is a placeholder - actual implementation would parse HTML
-            return {
-                "source": "HLTV",
-                "team": team_name,
-                "timestamp": datetime.now().isoformat(),
-                "data": "Fetching from HLTV..."
-            }
+            logger.info(f"Fetching CS2 validated stats for {team_name}")
+            return self.build_validated_payload(
+                team_name,
+                "cs2",
+                "ranking roster maps recent results",
+                "team",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching team stats for {team_name}: {e}")
             return None
 
-    def fetch_match_info(self, team1: str, team2: str) -> Optional[Dict[str, Any]]:
+    def fetch_match_info(self, team1: str, team2: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Fetch CS2 match information from multiple sources.
         
@@ -137,20 +177,13 @@ class CS2Fetcher(DataFetcher):
             match_query = f"{team1} vs {team2}"
             logger.info(f"Searching for CS2 match info: {match_query}")
 
-            # Try HLTV
-            hltv_data = self._fetch_hltv_match(team1, team2)
-            
-            # Try Liquipedia
-            liquipedia_data = self._fetch_liquipedia_match(team1, team2)
-
-            return {
-                "sources": {
-                    "hltv": hltv_data,
-                    "liquipedia": liquipedia_data
-                },
-                "match": f"{team1} vs {team2}",
-                "status": "data_collected"
-            }
+            return self.build_validated_payload(
+                f"{team1} vs {team2}",
+                "cs2",
+                "h2h roster maps recent results",
+                "match",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching match info for {team1} vs {team2}: {e}")
             return None
@@ -158,13 +191,13 @@ class CS2Fetcher(DataFetcher):
     def _fetch_hltv_match(self, team1: str, team2: str) -> Optional[Dict[str, Any]]:
         """Fetch from HLTV."""
         try:
-            search_url = f"{self.HLTV_BASE}/results?team={quote(team1)}"
-            logger.debug(f"HLTV search: {search_url}")
-            # Placeholder implementation
+            stats_data = search_cs2_stats(team1)
+            logger.info(f"HLTV search completed for {team1}")
             return {
                 "source": "HLTV",
-                "url": search_url,
-                "status": "searching"
+                "team": team1,
+                "data": stats_data,
+                "status": "completed"
             }
         except Exception as e:
             logger.warning(f"HLTV fetch failed: {e}")
@@ -173,16 +206,74 @@ class CS2Fetcher(DataFetcher):
     def _fetch_liquipedia_match(self, team1: str, team2: str) -> Optional[Dict[str, Any]]:
         """Fetch from Liquipedia."""
         try:
-            search_url = f"{self.LIQUIPEDIA_BASE}/search?query={quote(team1)}"
-            logger.debug(f"Liquipedia search: {search_url}")
-            # Placeholder implementation
+            # Liquipedia included in search_cs2_stats via site:liquipedia.net
+            stats_data = search_cs2_stats(f"{team1} vs {team2}")
+            logger.info(f"Liquipedia search completed for {team1} vs {team2}")
             return {
                 "source": "Liquipedia",
-                "url": search_url,
-                "status": "searching"
+                "match": f"{team1} vs {team2}",
+                "data": stats_data,
+                "status": "completed"
             }
         except Exception as e:
             logger.warning(f"Liquipedia fetch failed: {e}")
+            return None
+
+
+class EsportsGameFetcher(DataFetcher):
+    """Fetch Dota 2, LoL, or Valorant data from configured esports sources."""
+
+    GAME_CONFIG = {
+        "dota2": {
+            "team_stat_type": "hero meta pub stats pro player form recent results",
+            "match_stat_type": "stand-ins brackets hero meta recent results",
+            "team_search": search_dota_stats,
+        },
+        "lol": {
+            "team_stat_type": "gold per minute objective control draft form recent results",
+            "match_stat_type": "draft roster changes objective control recent results",
+            "team_search": search_lol_stats,
+        },
+        "valorant": {
+            "team_stat_type": "map stats agent stats lineup recent results",
+            "match_stat_type": "map stats agents roster changes recent results",
+            "team_search": search_valorant_stats,
+        },
+    }
+
+    def __init__(self, game_key: str):
+        super().__init__()
+        if game_key not in self.GAME_CONFIG:
+            raise ValueError(f"Unsupported esports game key: {game_key}")
+        self.game_key = game_key
+        self.config = self.GAME_CONFIG[game_key]
+
+    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        try:
+            logger.info("Fetching %s esports info for %s", self.game_key, team_name)
+            return self.build_validated_payload(
+                team_name,
+                self.game_key,
+                self.config["team_stat_type"],
+                "team",
+                context_terms=context_terms,
+            )
+        except Exception as e:
+            logger.error("Error fetching %s team info for %s: %s", self.game_key, team_name, e)
+            return None
+
+    def fetch_match_info(self, team1: str, team2: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        try:
+            logger.info("Fetching %s match info for %s vs %s", self.game_key, team1, team2)
+            return self.build_validated_payload(
+                f"{team1} vs {team2}",
+                self.game_key,
+                self.config["match_stat_type"],
+                "match",
+                context_terms=context_terms,
+            )
+        except Exception as e:
+            logger.error("Error fetching %s match info for %s vs %s: %s", self.game_key, team1, team2, e)
             return None
 
 
@@ -193,34 +284,47 @@ class FootballFetcher(DataFetcher):
     FLASHSCORE_BASE = "https://www.flashscore.com"
     TRANSFERMARKT_BASE = "https://www.transfermarkt.com"
 
-    def fetch_team_info(self, team_name: str) -> Optional[Dict[str, Any]]:
+    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch football team information."""
         try:
             logger.info(f"Fetching football info for {team_name}")
-            
-            return {
-                "sources": {
-                    "whoscored": self._fetch_whoscored(team_name),
-                    "flashscore": self._fetch_flashscore(team_name),
-                    "transfermarkt": self._fetch_transfermarkt(team_name)
-                },
-                "team": team_name
-            }
+            return self.build_validated_payload(
+                team_name,
+                "football",
+                "injuries lineup xg recent results",
+                "team",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching football info for {team_name}: {e}")
             return None
 
     def _fetch_whoscored(self, team_name: str) -> Dict[str, Any]:
         """Fetch from WhoScored."""
-        return {"source": "WhoScored", "status": "searching"}
+        try:
+            data = search_football_stats(team_name)
+            return {"source": "WhoScored", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"WhoScored fetch failed: {e}")
+            return {"source": "WhoScored", "status": "failed"}
 
     def _fetch_flashscore(self, team_name: str) -> Dict[str, Any]:
         """Fetch from Flashscore."""
-        return {"source": "Flashscore", "status": "searching"}
+        try:
+            data = search_football_stats(team_name)
+            return {"source": "Flashscore", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"Flashscore fetch failed: {e}")
+            return {"source": "Flashscore", "status": "failed"}
 
     def _fetch_transfermarkt(self, team_name: str) -> Dict[str, Any]:
         """Fetch from Transfermarkt."""
-        return {"source": "Transfermarkt", "status": "searching"}
+        try:
+            data = search_football_stats(team_name)
+            return {"source": "Transfermarkt", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"Transfermarkt fetch failed: {e}")
+            return {"source": "Transfermarkt", "status": "failed"}
 
 
 class TennisFetcher(DataFetcher):
@@ -230,103 +334,138 @@ class TennisFetcher(DataFetcher):
     WTA_BASE = "https://www.wtatennis.com"
     TENNIS_EXPLORER_BASE = "https://www.tennisexplorer.com"
 
-    def fetch_player_info(self, player_name: str) -> Optional[Dict[str, Any]]:
+    def fetch_player_info(self, player_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch tennis player information."""
         try:
             logger.info(f"Fetching tennis info for {player_name}")
-            
-            return {
-                "sources": {
-                    "atp_wta": self._fetch_atp_wta(player_name),
-                    "tennis_explorer": self._fetch_tennis_explorer(player_name)
-                },
-                "player": player_name
-            }
+            return self.build_validated_payload(
+                player_name,
+                "tennis",
+                "ranking h2h surface form recent matches",
+                "player",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching tennis info for {player_name}: {e}")
             return None
 
     def _fetch_atp_wta(self, player_name: str) -> Dict[str, Any]:
         """Fetch from ATP/WTA Tour."""
-        return {"source": "ATP/WTA", "status": "searching"}
+        try:
+            data = search_tennis_player(player_name)
+            return {"source": "ATP/WTA", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"ATP/WTA fetch failed: {e}")
+            return {"source": "ATP/WTA", "status": "failed"}
 
     def _fetch_tennis_explorer(self, player_name: str) -> Dict[str, Any]:
         """Fetch from Tennis Explorer."""
-        return {"source": "TennisExplorer", "status": "searching"}
+        try:
+            data = search_tennis_player(player_name)
+            return {"source": "TennisExplorer", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"Tennis Explorer fetch failed: {e}")
+            return {"source": "TennisExplorer", "status": "failed"}
 
 
 class MMAFetcher(DataFetcher):
-    """Fetch MMA/Boxing data from Sherdog, Tapology, BoxRec."""
+    """Fetch MMA/Boxing data from Sherdog, UFC Stats, and BoxRec."""
 
     SHERDOG_BASE = "https://www.sherdog.com"
-    TAPOLOGY_BASE = "https://www.tapology.com"
+    TAPOLOGY_BASE = "https://www.ufcstats.com"
     BOXREC_BASE = "https://www.boxrec.com"
 
-    def fetch_fighter_info(self, fighter_name: str) -> Optional[Dict[str, Any]]:
+    def fetch_fighter_info(self, fighter_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch fighter information."""
         try:
             logger.info(f"Fetching MMA/Boxing info for {fighter_name}")
-            
-            return {
-                "sources": {
-                    "sherdog": self._fetch_sherdog(fighter_name),
-                    "tapology": self._fetch_tapology(fighter_name),
-                    "boxrec": self._fetch_boxrec(fighter_name)
-                },
-                "fighter": fighter_name
-            }
+            return self.build_validated_payload(
+                fighter_name,
+                "mma",
+                "record reach striking takedowns recent fight",
+                "fighter",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching MMA info for {fighter_name}: {e}")
             return None
 
     def _fetch_sherdog(self, fighter_name: str) -> Dict[str, Any]:
         """Fetch from Sherdog."""
-        return {"source": "Sherdog", "status": "searching"}
+        try:
+            data = search_mma_fighter(fighter_name)
+            return {"source": "Sherdog", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"Sherdog fetch failed: {e}")
+            return {"source": "Sherdog", "status": "failed"}
 
     def _fetch_tapology(self, fighter_name: str) -> Dict[str, Any]:
         """Fetch from Tapology."""
-        return {"source": "Tapology", "status": "searching"}
+        try:
+            data = search_mma_fighter(fighter_name)
+            return {"source": "Tapology", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"Tapology fetch failed: {e}")
+            return {"source": "Tapology", "status": "failed"}
 
     def _fetch_boxrec(self, fighter_name: str) -> Dict[str, Any]:
         """Fetch from BoxRec."""
-        return {"source": "BoxRec", "status": "searching"}
+        try:
+            data = search_boxing_fighter(fighter_name)
+            return {"source": "BoxRec", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"BoxRec fetch failed: {e}")
+            return {"source": "BoxRec", "status": "failed"}
 
 
 class BasketballFetcher(DataFetcher):
-    """Fetch basketball data from NBA.com, EuroLeague, RealGM."""
+    """Fetch basketball data from Basketball-Reference and Euroleague official sources."""
 
-    NBA_BASE = "https://www.nba.com"
-    EUROLEAGUE_BASE = "https://www.euroleague.net"
-    REALGM_BASE = "https://www.realgm.com"
+    NBA_BASE = "https://www.basketball-reference.com"
+    EUROLEAGUE_BASE = "https://www.euroleaguebasketball.net"
+    REALGM_BASE = "https://www.euroleaguebasketball.net"
 
-    def fetch_team_info(self, team_name: str) -> Optional[Dict[str, Any]]:
+    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch basketball team information."""
         try:
             logger.info(f"Fetching basketball info for {team_name}")
-            
-            return {
-                "sources": {
-                    "nba": self._fetch_nba(team_name),
-                    "euroleague": self._fetch_euroleague(team_name),
-                    "realgm": self._fetch_realgm(team_name)
-                },
-                "team": team_name
-            }
+            return self.build_validated_payload(
+                team_name,
+                "basketball",
+                "injuries lineup pace rating recent games",
+                "team",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching basketball info for {team_name}: {e}")
             return None
 
     def _fetch_nba(self, team_name: str) -> Dict[str, Any]:
         """Fetch from NBA.com."""
-        return {"source": "NBA", "status": "searching"}
+        try:
+            data = search_basketball_team(team_name)
+            return {"source": "NBA", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"NBA fetch failed: {e}")
+            return {"source": "NBA", "status": "failed"}
 
     def _fetch_euroleague(self, team_name: str) -> Dict[str, Any]:
         """Fetch from EuroLeague."""
-        return {"source": "EuroLeague", "status": "searching"}
+        try:
+            data = search_basketball_team(team_name)
+            return {"source": "EuroLeague", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"EuroLeague fetch failed: {e}")
+            return {"source": "EuroLeague", "status": "failed"}
 
     def _fetch_realgm(self, team_name: str) -> Dict[str, Any]:
         """Fetch from RealGM."""
-        return {"source": "RealGM", "status": "searching"}
+        try:
+            data = search_basketball_team(team_name)
+            return {"source": "RealGM", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"RealGM fetch failed: {e}")
+            return {"source": "RealGM", "status": "failed"}
 
 
 class HockeyFetcher(DataFetcher):
@@ -335,97 +474,128 @@ class HockeyFetcher(DataFetcher):
     ELITEPROSPECTS_BASE = "https://www.eliteprospects.com"
     NST_BASE = "https://www.naturalstattrick.com"
 
-    def fetch_team_info(self, team_name: str) -> Optional[Dict[str, Any]]:
+    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch hockey team information."""
         try:
             logger.info(f"Fetching hockey info for {team_name}")
-            
-            return {
-                "sources": {
-                    "eliteprospects": self._fetch_eliteprospects(team_name),
-                    "nst": self._fetch_nst(team_name)
-                },
-                "team": team_name
-            }
+            return self.build_validated_payload(
+                team_name,
+                "hockey",
+                "injuries roster corsi recent games",
+                "team",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching hockey info for {team_name}: {e}")
             return None
 
     def _fetch_eliteprospects(self, team_name: str) -> Dict[str, Any]:
         """Fetch from EliteProspects."""
-        return {"source": "EliteProspects", "status": "searching"}
+        try:
+            data = search_hockey_team(team_name)
+            return {"source": "EliteProspects", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"EliteProspects fetch failed: {e}")
+            return {"source": "EliteProspects", "status": "failed"}
 
     def _fetch_nst(self, team_name: str) -> Dict[str, Any]:
         """Fetch from NaturalStatTrick."""
-        return {"source": "NST", "status": "searching"}
+        try:
+            data = search_hockey_team(team_name)
+            return {"source": "NST", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"NST fetch failed: {e}")
+            return {"source": "NST", "status": "failed"}
 
 
 class TableTennisFetcher(DataFetcher):
-    """Fetch table tennis data from ITTF, Flashscore, StatsTable."""
+    """Fetch table tennis data from ITTF and Table Tennis Guide."""
 
     ITTF_BASE = "https://www.ittfworld.com"
-    FLASHSCORE_BASE = "https://www.flashscore.com"
-    STATSBOMB_BASE = "https://www.statsbomb.com"
+    FLASHSCORE_BASE = "https://www.tabletennis-guide.com"
+    STATSBOMB_BASE = "https://www.tabletennis-guide.com"
 
-    def fetch_player_info(self, player_name: str) -> Optional[Dict[str, Any]]:
+    def fetch_player_info(self, player_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch table tennis player information."""
         try:
             logger.info(f"Fetching table tennis info for {player_name}")
-            
-            return {
-                "sources": {
-                    "ittf": self._fetch_ittf(player_name),
-                    "flashscore": self._fetch_flashscore(player_name),
-                    "statsbomb": self._fetch_statsbomb(player_name)
-                },
-                "player": player_name
-            }
+            return self.build_validated_payload(
+                player_name,
+                "table_tennis",
+                "ranking results recent matches",
+                "player",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching table tennis info for {player_name}: {e}")
             return None
 
     def _fetch_ittf(self, player_name: str) -> Dict[str, Any]:
         """Fetch from ITTF World Rankings."""
-        return {"source": "ITTF", "status": "searching"}
+        try:
+            data = search_table_tennis_player(player_name)
+            return {"source": "ITTF", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"ITTF fetch failed: {e}")
+            return {"source": "ITTF", "status": "failed"}
 
     def _fetch_flashscore(self, player_name: str) -> Dict[str, Any]:
         """Fetch from Flashscore Table Tennis."""
-        return {"source": "Flashscore", "status": "searching"}
+        try:
+            data = search_table_tennis_player(player_name)
+            return {"source": "Flashscore", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"Flashscore fetch failed: {e}")
+            return {"source": "Flashscore", "status": "failed"}
 
     def _fetch_statsbomb(self, player_name: str) -> Dict[str, Any]:
         """Fetch from StatsTable/StatsStats."""
-        return {"source": "StatsTable", "status": "searching"}
+        try:
+            data = search_table_tennis_player(player_name)
+            return {"source": "StatsTable", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"StatsTable fetch failed: {e}")
+            return {"source": "StatsTable", "status": "failed"}
 
 
 class VolleyballFetcher(DataFetcher):
-    """Fetch volleyball data from WorldofVolley, Volleybox."""
+    """Fetch volleyball data from Volleybox."""
 
-    WORLDOFVOLLEY_BASE = "https://www.worldofvolley.com"
+    WORLDOFVOLLEY_BASE = "https://www.volleybox.net"
     VOLLEYBOX_BASE = "https://www.volleybox.net"
 
-    def fetch_team_info(self, team_name: str) -> Optional[Dict[str, Any]]:
+    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch volleyball team information."""
         try:
             logger.info(f"Fetching volleyball info for {team_name}")
-            
-            return {
-                "sources": {
-                    "worldofvolley": self._fetch_worldofvolley(team_name),
-                    "volleybox": self._fetch_volleybox(team_name)
-                },
-                "team": team_name
-            }
+            return self.build_validated_payload(
+                team_name,
+                "volleyball",
+                "roster injuries recent matches",
+                "team",
+                context_terms=context_terms,
+            )
         except Exception as e:
             logger.error(f"Error fetching volleyball info for {team_name}: {e}")
             return None
 
     def _fetch_worldofvolley(self, team_name: str) -> Dict[str, Any]:
         """Fetch from WorldofVolley."""
-        return {"source": "WorldofVolley", "status": "searching"}
+        try:
+            data = search_volleyball_team(team_name)
+            return {"source": "WorldofVolley", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"WorldofVolley fetch failed: {e}")
+            return {"source": "WorldofVolley", "status": "failed"}
 
     def _fetch_volleybox(self, team_name: str) -> Dict[str, Any]:
         """Fetch from Volleybox."""
-        return {"source": "Volleybox", "status": "searching"}
+        try:
+            data = search_volleyball_team(team_name)
+            return {"source": "Volleybox", "data": data, "status": "completed"}
+        except Exception as e:
+            logger.warning(f"Volleybox fetch failed: {e}")
+            return {"source": "Volleybox", "status": "failed"}
 
 
 # Factory for creating appropriate fetcher

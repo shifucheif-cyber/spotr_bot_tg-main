@@ -7,6 +7,17 @@ from services.data_fetcher import TableTennisFetcher
 logger = logging.getLogger(__name__)
 
 
+def has_validated_data(result: str) -> bool:
+    return bool(result) and "Валидация: validated" in result and "Подтверждено источников:" in result
+
+
+def build_context_terms(match_context: dict | None, opponent: str) -> str:
+    if not match_context:
+        return opponent
+    parts = [opponent, match_context.get("date", ""), match_context.get("league", "")]
+    return " ".join(part for part in parts if part)
+
+
 def normalize_match_name(match_name: str) -> str:
     return re.sub(r"\s+", " ", match_name.strip())
 
@@ -76,7 +87,7 @@ def parse_table_tennis_fallback(match_name: str) -> str:
 """
 
 
-def fetch_table_tennis_real_data(match_name: str) -> str:
+def fetch_table_tennis_real_data(match_name: str, match_context: dict | None = None) -> str:
     """Fetch real table tennis match data from Flashscore, TT-Cup, Setka Cup."""
     try:
         players = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_name, flags=re.I)
@@ -85,11 +96,12 @@ def fetch_table_tennis_real_data(match_name: str) -> str:
 
         player1 = players[0].strip()
         player2 = players[1].strip()
+        player1_context = build_context_terms(match_context, player2)
+        player2_context = build_context_terms(match_context, player1)
         
-        # Use TennisFetcher as base (can be extended with specific table tennis logic)
-        fetcher = TennisFetcher()
-        p1_info = fetcher.fetch_player_info(player1)
-        p2_info = fetcher.fetch_player_info(player2)
+        fetcher = TableTennisFetcher()
+        p1_info = fetcher.fetch_player_info(player1, context_terms=player1_context)
+        p2_info = fetcher.fetch_player_info(player2, context_terms=player2_context)
 
         result = f"""
 🏓 **Матч:** {player1.upper()} vs {player2.upper()}
@@ -141,12 +153,11 @@ def format_table_tennis_data(player_info: dict) -> str:
     return "\n".join(lines) if lines else "Данные загружаются..."
 
 
-def get_table_tennis_data(match_name: str) -> str:
+def get_table_tennis_data(match_name: str, match_context: dict | None = None) -> str:
     # Try to fetch real data
-    result = fetch_table_tennis_real_data(match_name)
-    if result and "Данные загружаются из" in result:
-        if "не" not in result:
-            return result
+    result = fetch_table_tennis_real_data(match_name, match_context=match_context)
+    if has_validated_data(result):
+        return result
 
     # Fall back to external sources
     external = parse_table_tennis_external(match_name)

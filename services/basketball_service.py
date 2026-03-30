@@ -7,6 +7,17 @@ from services.data_fetcher import BasketballFetcher
 logger = logging.getLogger(__name__)
 
 
+def has_validated_data(result: str) -> bool:
+    return bool(result) and "Валидация: validated" in result and "Подтверждено источников:" in result
+
+
+def build_context_terms(match_context: dict | None, opponent: str) -> str:
+    if not match_context:
+        return opponent
+    parts = [opponent, match_context.get("date", ""), match_context.get("league", "")]
+    return " ".join(part for part in parts if part)
+
+
 def normalize_match_name(match_name: str) -> str:
     return re.sub(r"\s+", " ", match_name.strip())
 
@@ -25,7 +36,7 @@ def parse_basketball_from_text(match_name: str) -> str:
 - скамейка, ротация и кондиции
 
 Анализ:
-- NBA.com и ESPN помогают проверить травмы и продвинутые метрики
+- Basketball-Reference и Euroleague official помогают проверить темп и эффективность
 - команда с лучшей защитой и подбором часто доминирует
 - скорость игры и качество трёхочковых решают итог
 - глубина скамейки важна в концовке
@@ -48,8 +59,8 @@ def parse_basketball_fallback(match_name: str) -> str:
 """
 
 
-def fetch_basketball_real_data(match_name: str) -> str:
-    """Fetch real basketball match data from NBA.com, EuroLeague, RealGM."""
+def fetch_basketball_real_data(match_name: str, match_context: dict | None = None) -> str:
+    """Fetch real basketball match data from Basketball-Reference and Euroleague official."""
     try:
         teams = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_name, flags=re.I)
         if len(teams) != 2:
@@ -57,18 +68,19 @@ def fetch_basketball_real_data(match_name: str) -> str:
 
         home_team = teams[0].strip()
         away_team = teams[1].strip()
+        home_context = build_context_terms(match_context, away_team)
+        away_context = build_context_terms(match_context, home_team)
         
         fetcher = BasketballFetcher()
-        home_info = fetcher.fetch_team_info(home_team)
-        away_info = fetcher.fetch_team_info(away_team)
+        home_info = fetcher.fetch_team_info(home_team, context_terms=home_context)
+        away_info = fetcher.fetch_team_info(away_team, context_terms=away_context)
 
         result = f"""
 🏀 **Матч:** {home_team.upper()} (H) vs {away_team.upper()} (A)
 
 **Источники данных:**
-- NBA.com (продвинутые метрики, травмы)
-- EuroLeague.net (европейский баскетбол)
-- RealGM (мировые лиги)
+- Basketball-Reference (темп, эффективность, полная NBA база)
+- Euroleaguebasketball.net (официальная статистика Евролиги)
 
 **Информация о домашней команде ({home_team.upper()}):**
 {format_basketball_data(home_info)}
@@ -136,10 +148,10 @@ def parse_basketball_external(match_name: str) -> str:
 """
 
 
-def get_basketball_data(match_name: str) -> str:
+def get_basketball_data(match_name: str, match_context: dict | None = None) -> str:
     # Try to fetch real data
-    result = fetch_basketball_real_data(match_name)
-    if result and "Данные загружаются..." not in result:
+    result = fetch_basketball_real_data(match_name, match_context=match_context)
+    if has_validated_data(result):
         return result
 
     # Fall back to external sources

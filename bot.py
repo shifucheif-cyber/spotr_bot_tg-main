@@ -17,14 +17,26 @@ from groq import Client as GroqClient, GroqError
 
 from data_router import get_match_data
 from services.match_finder import check_match_clarification, format_match_confirmation
+from services.name_normalizer import resolve_entity_name, resolve_match_entities, split_match_text
+from services.user_store import (
+    get_stats_summary,
+    get_user_details,
+    init_user_store,
+    list_recent_users,
+    log_user_event,
+    record_analysis_result,
+    touch_user,
+)
 
 # --- LOAD ENV ---
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
+LLM_FALLBACK_ORDER = ["deepseek", "google", "groq"]
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-1.5")
@@ -34,183 +46,309 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "compound-beta-mini")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL")
 
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "483078446"))
+
 if not TG_TOKEN:
     raise ValueError("TELEGRAM_TOKEN не задан")
 
-if LLM_PROVIDER == "google":
-    if not GOOGLE_API_KEY:
-        raise ValueError("GOOGLE_API_KEY не задан")
-elif LLM_PROVIDER == "groq":
-    if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY не задан")
-else:
-    raise ValueError("LLM_PROVIDER должен быть 'google' или 'groq'")
+if not any([GOOGLE_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY]):
+    raise ValueError("Не задан ни один LLM API key: нужен хотя бы один из GOOGLE_API_KEY, GROQ_API_KEY или DEEPSEEK_API_KEY")
+
+if LLM_PROVIDER not in {"google", "groq", "deepseek"}:
+    logger.warning("Unsupported LLM_PROVIDER=%s. Unified fallback order will be used: %s", LLM_PROVIDER, " -> ".join(LLM_FALLBACK_ORDER))
 
 # --- INIT ---
 bot = Bot(token=TG_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Принудительная инициализация обоих клиентов для возможности переключения
 google_client = None
+if GOOGLE_API_KEY and not GOOGLE_API_KEY.startswith("your_"):
+    try:
+        google_client = GoogleClient(
+            api_key=GOOGLE_API_KEY,
+            http_options=genai_types.HttpOptions(api_version=GOOGLE_API_VERSION),
+        )
+        logging.info("Google client initialized for fallback")
+    except Exception as e:
+        logging.warning(f"Failed to initialize Google client: {e}")
+else:
+    logging.info("Google API key is missing or placeholder; Gemini fallback disabled")
+
 groq_client = None
+
+deepseek_client = None
+if DEEPSEEK_API_KEY:
+    try:
+        from openai import AsyncOpenAI
+
+        deepseek_client = AsyncOpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL
+        )
+        logging.info("DeepSeek client initialized")
+    except ImportError:
+        logging.warning("OpenAI package is not installed; DeepSeek provider disabled")
+    except Exception as e:
+        logging.warning(f"Failed to initialize DeepSeek client: {e}")
+else:
+    logging.info("DeepSeek API key is missing; DeepSeek provider disabled")
+
 SELECTED_GOOGLE_MODEL = GOOGLE_MODEL
 
-if LLM_PROVIDER == "google":
-    google_client = GoogleClient(
-        api_key=GOOGLE_API_KEY,
-        http_options=genai_types.HttpOptions(api_version=GOOGLE_API_VERSION),
-    )
-
-    def get_available_models(page_size: int = 50) -> list[str]:
-        try:
-            pager = google_client.models.list(config={"page_size": page_size})
-            available = [model.name for model in pager]
-            logging.info("Available Google models: %s", available)
-            return available
-        except Exception as e:
-            logging.warning("Unable to list available Google models: %s", e)
-            return []
+def get_available_models(page_size: int = 50) -> list[str]:
+    if not google_client:
+        return []
+    try:
+        pager = google_client.models.list(config={"page_size": page_size})
+        available = [model.name for model in pager]
+        logging.info("Available Google models: %s", available)
+        return available
+    except Exception as e:
+        logging.warning("Unable to list available Google models: %s", e)
+        return []
 
 
-    def choose_google_model(default_model: str) -> str:
-        available = get_available_models()
-        if not available:
-            logging.info("No available models returned, using default model: %s", default_model)
-            return default_model
+def choose_google_model(default_model: str) -> str:
+    available = get_available_models()
+    if not available:
+        logging.info("No available models returned, using default model: %s", default_model)
+        return default_model
 
+    for model in available:
+        if model == default_model or model.endswith(f"/{default_model}"):
+            logging.info("Using requested model: %s", model)
+            return model
+
+    preferred = [
+        default_model,
+        "gemini-2.0-flash-lite-001",
+        "gemini-2.0-flash-lite",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-001",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-1.5-proto",
+        "gemini-2.0",
+        "gemini-1.0",
+        "text-bison@001",
+    ]
+    for candidate in preferred:
         for model in available:
-            if model == default_model or model.endswith(f"/{default_model}"):
-                logging.info("Using requested model: %s", model)
+            if model == candidate or model.endswith(f"/{candidate}") or candidate in model:
+                logging.info("Switching to available model: %s", model)
                 return model
 
-        preferred = [
-            default_model,
-            "gemini-2.0-flash-lite-001",
-            "gemini-2.0-flash-lite",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash-001",
-            "gemini-2.0-flash",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-1.5-proto",
-            "gemini-2.0",
-            "gemini-1.0",
-            "text-bison@001",
-        ]
-        for candidate in preferred:
-            for model in available:
-                if model == candidate or model.endswith(f"/{candidate}") or candidate in model:
-                    logging.info("Switching to available model: %s", model)
-                    return model
-
-        logging.warning("Preferred models not found; using first available model: %s", available[0])
-        return available[0]
+    logging.warning("Preferred models not found; using first available model: %s", available[0])
+    return available[0]
 
 
-    def generate_with_google(contents: str) -> str:
-        try:
-            response = google_client.models.generate_content(
-                model=SELECTED_GOOGLE_MODEL,
-                contents=contents,
-            )
-            return response.text
-        except Exception as e:
-            text = str(e).lower()
-            if "resource_exhausted" in text or "quota exceeded" in text or "too many requests" in text:
-                available = get_available_models()
-                fallback = [
-                    model for model in available
-                    if model != SELECTED_GOOGLE_MODEL and ("flash-lite" in model or "lite" in model)
-                ]
-                for model in fallback:
-                    try:
-                        logging.warning("Trying fallback model %s after quota error", model)
-                        response = google_client.models.generate_content(
-                            model=model,
-                            contents=contents,
-                        )
-                        return response.text
-                    except Exception as e2:
-                        logging.warning("Fallback model %s failed: %s", model, e2)
-            raise
+SELECTED_GOOGLE_MODEL = choose_google_model(GOOGLE_MODEL)
+logging.info("Selected Google Generative model: %s", SELECTED_GOOGLE_MODEL)
+logging.info("Google API version: %s", GOOGLE_API_VERSION)
 
-
-    SELECTED_GOOGLE_MODEL = choose_google_model(GOOGLE_MODEL)
-    logging.info("Selected Google Generative model: %s", SELECTED_GOOGLE_MODEL)
-    logging.info("Google API version: %s", GOOGLE_API_VERSION)
-else:
+if GROQ_API_KEY:
     groq_client = GroqClient(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL or None)
     logging.info("Selected Groq model: %s", GROQ_MODEL)
     logging.info("Groq base URL: %s", groq_client.base_url)
+else:
+    logging.info("Groq API key is missing; Groq provider disabled")
 
 
-def generate_with_groq(contents: str, discipline: str = "киберспорт") -> str:
+# --- LLM MODELS TO TRY ---
+GROQ_STABLE_MODELS = [
+    "llama-3.3-70b-versatile",
+    "mixtral-8x7b-32768",
+    "llama-3.1-8b-instant",
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+]
+
+
+def _create_groq_request(model_name: str, system_prompt: str, contents: str):
+    """Helper function for Groq API call to avoid lambda late binding issues."""
+    return groq_client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": contents},
+        ],
+        max_completion_tokens=512,
+        temperature=0.2,
+        timeout=30.0
+    )
+
+
+def build_google_contents(system_prompt: str, contents: str) -> str:
+    return f"SYSTEM:\n{system_prompt}\n\nUSER:\n{contents}"
+
+
+async def generate_with_google(contents: str, discipline: str = "киберспорт", discipline_key: str = None) -> str:
+    """Async Google Gemini content generation with fallback support."""
+    if not google_client or not SELECTED_GOOGLE_MODEL:
+        raise ValueError("Google Gemini client is not configured (API key is missing or SELECTED_GOOGLE_MODEL is empty)")
+
+    system_prompt = get_discipline_prompt(discipline, discipline_key)
+    request_contents = build_google_contents(system_prompt, contents)
+
     try:
-        system_prompt = get_discipline_prompt(discipline)
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: google_client.models.generate_content(
+                model=SELECTED_GOOGLE_MODEL,
+                contents=request_contents,
+            )
+        )
+        return response.text
+    except Exception as e:
+        text = str(e).lower()
+        # Try fallback model if quota exceeded
+        if "resource_exhausted" in text or "quota exceeded" in text or "too many requests" in text:
+            available = get_available_models()
+            fallback = [
+                model for model in available
+                if model != SELECTED_GOOGLE_MODEL and ("flash-lite" in model or "lite" in model)
+            ]
+            for model in fallback:
+                try:
+                    logging.warning("Trying fallback model %s after quota error", model)
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: google_client.models.generate_content(
+                            model=model,
+                            contents=request_contents,
+                        )
+                    )
+                    return response.text
+                except Exception as e2:
+                    logging.warning("Fallback model %s failed: %s", model, e2)
+        raise
+
+
+async def generate_with_groq(contents: str, discipline: str = "киберспорт", discipline_key: str = None) -> str:
+    """Async Groq content generation with multiple model fallback."""
+    if not groq_client:
+        raise ValueError("Groq client is not configured (API key is missing)")
+
+    # Пытаемся сначала использовать основной модель из .env
+    models_to_try = [GROQ_MODEL] + [m for m in GROQ_STABLE_MODELS if m != GROQ_MODEL]
+    
+    last_error = None
+    system_prompt = get_discipline_prompt(discipline, discipline_key)
+
+    for model_name in models_to_try:
+        try:
+            logger.info(f"Trying Groq model: {model_name}...")
+            loop = asyncio.get_event_loop()
+            # Use helper function instead of lambda to avoid late binding issues
+            response = await loop.run_in_executor(
+                None, 
+                _create_groq_request,
+                model_name,
+                system_prompt,
+                contents
+            )
+            
+            if response.choices and response.choices[0].message.content:
+                logger.info(f"Successfully generated content with {model_name}")
+                return response.choices[0].message.content
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Groq model {model_name} failed: {e}")
+            # Пауза перед следующей попыткой при сетевой ошибке
+            if "connection" in str(e).lower():
+                await asyncio.sleep(1)
+            continue
+
+    # Если и Gemini нет, кидаем последнюю ошибку Groq
+    if last_error:
+        raise last_error
+    raise ValueError("Failed to generate content with any available LLM provider")
+
+
+async def generate_with_deepseek(contents: str, discipline: str = "киберспорт", discipline_key: str = None) -> str:
+    """Async DeepSeek content generation."""
+    if not deepseek_client:
+        raise ValueError("DeepSeek client is not configured (API key is missing)")
+    
+    try:
+        system_prompt = get_discipline_prompt(discipline, discipline_key)
+        response = await deepseek_client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": contents},
             ],
-            max_completion_tokens=512,  # Уменьшено с 1024 для избежания ошибок Telegram
+            max_completion_tokens=2000,
             temperature=0.2,
+            timeout=30.0
         )
-        if not response.choices:
-            raise ValueError("Groq response returned no choices")
-        return response.choices[0].message.content or ""
-    except GroqError as e:
-        text = str(e).lower()
-        if "model_decommissioned" in text or "decommissioned" in text:
-            fallback_models = [
-                "compound-beta-mini",
-                "compound-beta",
-                "qwen/qwen3-32b",
-                "openai/gpt-oss-20b",
-                "openai/gpt-oss-120b",
-            ]
-            for model in fallback_models:
-                if model == GROQ_MODEL:
-                    continue
-                try:
-                    logging.warning("Groq model %s decommissioned; trying fallback %s", GROQ_MODEL, model)
-                    system_prompt = get_discipline_prompt(discipline)
-                    response = groq_client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": contents},
-                        ],
-                        max_completion_tokens=512,
-                        temperature=0.2,
-                    )
-                    if not response.choices:
-                        raise ValueError("Groq response returned no choices")
-                    logging.info("Groq fallback model selected: %s", model)
-                    return response.choices[0].message.content or ""
-                except GroqError as e2:
-                    logging.warning("Groq fallback model %s failed: %s", model, e2)
+        
+        if response.choices and response.choices[0].message.content:
+            logger.info(f"Successfully generated content with DeepSeek model {DEEPSEEK_MODEL}")
+            return response.choices[0].message.content
+        raise ValueError("DeepSeek returned empty response")
+    except Exception as e:
+        logger.error(f"DeepSeek generation failed: {e}")
         raise
 
 
-def generate_content(contents: str, discipline: str = "киберспорт") -> str:
-    if LLM_PROVIDER == "groq":
-        return generate_with_groq(contents, discipline)
-    return generate_with_google(contents)
+async def generate_content(contents: str, discipline: str = "киберспорт", discipline_key: str = None) -> str:
+    provider_handlers = {
+        "deepseek": generate_with_deepseek,
+        "google": generate_with_google,
+        "groq": generate_with_groq,
+    }
+    last_error = None
+
+    logger.info("LLM fallback order: %s", " -> ".join(LLM_FALLBACK_ORDER))
+
+    for provider_name in LLM_FALLBACK_ORDER:
+        handler = provider_handlers[provider_name]
+        try:
+            logger.info("Trying LLM provider: %s", provider_name)
+            response = await handler(contents, discipline, discipline_key)
+            if response and response.strip():
+                logger.info("LLM provider succeeded: %s", provider_name)
+                return response
+            raise ValueError(f"{provider_name} returned empty response")
+        except Exception as exc:
+            last_error = exc
+            logger.warning("LLM provider %s failed: %s", provider_name, exc)
+            continue
+
+    if last_error:
+        raise last_error
+    raise ValueError("No available LLM providers succeeded")
 
 
-logging.info("LLM provider: %s", LLM_PROVIDER)
+logging.info("Configured LLM provider hint: %s", LLM_PROVIDER)
 
 # --- OPTIMIZED SYSTEM PROMPTS BY DISCIPLINE ---
 DISCIPLINE_PROMPTS = {
     "киберспорт": """Ты - профессиональный аналитик киберспортивных матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- рейтингах и форме команд  
-- истории личных встреч
-- составе и подготовке
-- картах и стратегиях
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные.
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о текущей форме, ключевых игроках и последних результатах).
+• **[Команда Б]:** (1-2 предложения о текущей форме, ключевых игроках и последних результатах).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: маппул, личные встречи или замены)
+• (Фактор 2: мотивация или турнирное положение)
+
+📈 **Вероятность победы (1-я команда):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -218,14 +356,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "cs2": """Ты - профессиональный аналитик Counter-Strike 2 матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- рейтингах HLTV и форме команд на разных картах
-- истории личных встреч и победном проценте
-- составе и ролях игроков
-- пуле карт и тактике
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные (HLTV, Liquipedia и др.).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о винрейтах на картах, форме лидеров и последних результатах на HLTV).
+• **[Команда Б]:** (1-2 предложения о винрейтах на картах, форме лидеров и последних результатах на HLTV).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: маппул и бан-пик карт)
+• (Фактор 2: история личных встреч H2H)
+
+📈 **Вероятность победы (1-я команда):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -233,14 +379,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "lol": """Ты - профессиональный аналитик League of Legends матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- рейтингах LEC/LPL/Worlds и форме команды
-- мета-чемпионах текущего патча  
-- составе и специализации игроков по ролям
-- истории встреч между командами
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные.
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о текущей форме, мете и ключевых игроках).
+• **[Команда Б]:** (1-2 предложения о текущей форме, мете и ключевых игроках).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: драфт и приоритетные чемпионы)
+• (Фактор 2: контроль объектов и ранняя игра)
+
+📈 **Вероятность победы (1-я команда):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -248,14 +402,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "dota2": """Ты - профессиональный аналитик Dota 2 матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- винрейтах героев в текущем патче
-- истории встреч между командами
-- составе и специализации (carry/mid/support)
-- недавних турнирах и форме
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные (Dotabuff, Liquipedia).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о пуле героев, форме коров и последних сериях).
+• **[Команда Б]:** (1-2 предложения о пуле героев, форме коров и последних сериях).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: влияние текущего патча на стратегии)
+• (Фактор 2: синергия саппортов и ранний прессинг)
+
+📈 **Вероятность победы (1-я команда):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -263,14 +425,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "valorant": """Ты - профессиональный аналитик Valorant матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- форме команды и ведущих игроков
-- картах и специализации по агентам
-- истории встреч
-- недавних турнирах
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные.
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о выборе агентов, форме дуэлянтов и последних результатах).
+• **[Команда Б]:** (1-2 предложения о выборе агентов, форме дуэлянтов и последних результатах).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: статистика на выбранных картах)
+• (Фактор 2: индивидуальный скилл ключевых игроков)
+
+📈 **Вероятность победы (1-я команда):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -278,14 +448,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "футбол": """Ты - профессиональный аналитик футбольных матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- форме команд и составе
-- травмах и отсутствиях
-- домашнем/выездном преимуществе
-- истории личных встреч
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные (WhoScored, Transfermarkt, Flashscore).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о текущей серии, травмах лидеров и стиле игры дома/в гостях).
+• **[Команда Б]:** (1-2 предложения о текущей серии, травмах лидеров и стиле игры дома/в гостях).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: отсутствие ключевых игроков из-за дисквалификаций/травм)
+• (Фактор 2: тактическое противостояние тренеров)
+
+📈 **Вероятность победы (1-я команда):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -293,14 +471,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "tennis": """Ты - профессиональный аналитик большого тенниса.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- рейтингах WTA/ATP
-- истории личных встреч (H2H) и результатах
-- покрытии и условиях игры
-- текущей форме и последних турнирах
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные (ATP/WTA, Tennis Explorer).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-й игрок):** X%
+📊 **Матч:** [Игрок А] vs [Игрок Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ игроков:**
+• **[Игрок А]:** (1-2 предложения о форме на текущем покрытии, физическом состоянии и последних турнирах).
+• **[Игрок Б]:** (1-2 предложения о форме на текущем покрытии, физическом состоянии и последних турнирах).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: статистика личных встреч H2H на этом покрытии)
+• (Фактор 2: психологическая устойчивость и мотивация)
+
+📈 **Вероятность победы (1-й игрок):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -308,14 +494,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "баскетбол": """Ты - профессиональный аналитик баскетбольных матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- составе и скамейке
-- темпе и защите
-- истории матчей между командами
-- травмах ключевых игроков
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные (NBA.com, ESPN).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о результативности, силе скамейки и форме лидеров).
+• **[Команда Б]:** (1-2 предложения о результативности, силе скамейки и форме лидеров).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: темп игры и эффективность защиты)
+• (Фактор 2: доминирование в краске и подборы)
+
+📈 **Вероятность победы (1-я команда):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -323,14 +517,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "хоккей": """Ты - профессиональный аналитик хоккейных матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- форме вратарей и команд
-- домашнем/выездном преимуществе
-- травмах и ротации лучших игроков
-- спецбригадах и последних результатах
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные (NHL.com, Flashscore).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о форме вратаря, игре в большинстве и последних матчах).
+• **[Команда Б]:** (1-2 предложения о форме вратаря, игре в большинстве и последних матчах).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: надежность защиты и спецбригады меньшинства)
+• (Фактор 2: история встреч в текущем сезоне)
+
+📈 **Вероятность победы (1-я команда):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -338,14 +540,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "мма": """Ты - профессиональный аналитик ММА поединков.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- рекордах и стиле бойцов (нокауты, подмышки, решения)
-- боевых опыте и уровне соперничества
-- весовой категории и условиях боя
-- последних победах/поражениях и мотивации
+Анализируй ТОЛЬКО указанный бой, используя ПОЛУЧЕННые данные (Sherdog, Tapology).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-й боец):** X%
+📊 **Бой:** [Боец А] vs [Боец Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ бойцов:**
+• **[Боец А]:** (1-2 предложения о стиле боя, последних победах и физической форме).
+• **[Боец Б]:** (1-2 предложения о стиле боя, последних победах и физической форме).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: преимущество в антропометрии или опыте)
+• (Фактор 2: весогонка и тренировочный лагерь)
+
+📈 **Вероятность победы (1-й боец):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -353,14 +563,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "boxing": """Ты - профессиональный аналитик боксёрских матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- боксёрских рекордах и стиле (бокс, свинг, апперкот)
-- опыте соперниках и титулах
-- весовой категории и условиях боя
-- последних боях и физическом состоянии
+Анализируй ТОЛЬКО указанный бой, используя ПОЛУЧЕННые данные (BoxRec).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-й боксёр):** X%
+📊 **Бой:** [Боксёр А] vs [Боксёр Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ боксёров:**
+• **[Боксёр А]:** (1-2 предложения о рекорде, стиле и последнем выступлении).
+• **[Боксёр Б]:** (1-2 предложения о рекорде, стиле и последнем выступлении).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: ударная мощь и работа ног)
+• (Фактор 2: уровень оппозиции в последних боях)
+
+📈 **Вероятность победы (1-й боксёр):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -368,14 +586,22 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "table_tennis": """Ты - профессиональный аналитик настольного тенниса.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- рейтингах ITTF
-- истории личных встреч и результатах
-- стиле игры (защита/атака) и технике
-- текущей форме и последних турнирах
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные (TT-Cup, Setka Cup).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-й игрок):** X%
+📊 **Матч:** [Игрок А] vs [Игрок Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ игроков:**
+• **[Игрок А]:** (1-2 предложения о текущей серии побед, стиле игры и выносливости).
+• **[Игрок Б]:** (1-2 предложения о текущей серии побед, стиле игры и выносливости).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: история личных встреч за последние 10-15 матчей)
+• (Фактор 2: психологическая устойчивость в решающих сетах)
+
+📈 **Вероятность победы (1-й игрок):** X%
+
 💰 **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
@@ -383,27 +609,38 @@ DISCIPLINE_PROMPTS = {
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
 
     "волейбол": """Ты - профессиональный аналитик волейбольных матчей.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- рейтингах и составе команд
-- эффективности приема и атаки
-- домашнем/выездном преимуществе
-- последних результатах
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные (Volleyball World, Flashscore).
 
 **ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:**
-📊 **Вероятность победы (1-я команда):** X%
-💰 **Рекомендация по ставке:**
+📊 **Матч:** [Команда А] vs [Команда Б]
+📅 **Дата:** [Дата]
+
+📝 **Анализ команд:**
+• **[Команда А]:** (1-2 предложения о приеме, атаке и форме связующего).
+• **[Команда Б]:** (1-2 предложения о приеме, атаке и форме связующего).
+
+🔍 **Ключевые факторы:**
+• (Фактор 1: глубина состава и наличие лидеров)
+• (Фактор 2: домашнее преимущество и jet lag)
+
+📈 **Вероятность победы (1-я команда):** X%
+
+ **Рекомендация по ставке:**
 - P > 80% → Ставка 6% от банка (Ультра-уверенность)
 - 66% ≤ P ≤ 80% → Ставка 3% от банка (Высокая вероятность)
 - 55% ≤ P ≤ 65% → Ставка 1% от банка (Рискованно/Валуй)
 - P < 55% → ⚠️ ПРОПУСТИТЬ (Высокая неопределённость)""",
-
 }
 
-def get_discipline_prompt(discipline: str) -> str:
+def get_discipline_prompt(discipline: str, discipline_key: str = None) -> str:
     """Получает оптимизированный prompt для дисциплины"""
     from services.match_finder import normalize_discipline
     
-    # Если это formato "киберспорт: CS2", извлечем "cs2"
+    # Если передан прямой ключ (например, 'cs2'), используем его сразу
+    if discipline_key and discipline_key in DISCIPLINE_PROMPTS:
+        return DISCIPLINE_PROMPTS[discipline_key]
+    
+    # Если это формат "киберспорт: CS2", извлечем "cs2"
     if ":" in discipline:
         parts = discipline.split(":")
         discipline = parts[1].strip().lower()
@@ -519,7 +756,8 @@ MMA/Бокс:
 class OrderAnalysis(StatesGroup):
     waiting_discipline = State()
     waiting_subdiscipline = State()  # ДЛЯ КИБЕРСПОРТА: выбор конкретной игры
-    waiting_match = State()
+    waiting_team1 = State()          # Первая команда/игрок
+    waiting_team2 = State()          # Вторая команда/игрок
     waiting_date = State()
     confirming_match = State()
 
@@ -559,6 +797,8 @@ DISCIPLINE_HIERARCHY = {
 # --- HANDLERS ---
 @dp.message(Command("start"))
 async def start(message: types.Message, state: FSMContext):
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, increment_requests=True)
+    log_user_event(message.from_user.id, "start")
     kb = [
         [types.KeyboardButton(text="киберспорт"), types.KeyboardButton(text="Футбол")],
         [types.KeyboardButton(text="Теннис"), types.KeyboardButton(text="ММА/Бокс")],
@@ -573,12 +813,13 @@ async def start(message: types.Message, state: FSMContext):
 
 @dp.message(OrderAnalysis.waiting_discipline)
 async def set_discipline(message: types.Message, state: FSMContext):
-    discipline = message.text.strip().lower()  # ✅ Приводим к нижнему регистру
+    discipline = message.text.strip().lower()
+    logging.info(f"User {message.from_user.id} selected discipline: {discipline}")
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, discipline=discipline)
+    log_user_event(message.from_user.id, "select_discipline", {"discipline": discipline})
     await state.update_data(discipline=discipline)
 
-    # Проверяем, есть ли субдисциплины
     if discipline in DISCIPLINE_HIERARCHY and DISCIPLINE_HIERARCHY[discipline].get("has_subdisciplines"):
-        # Показываем меню субдисциплин
         subdisbut = DISCIPLINE_HIERARCHY[discipline]["options"]
         kb = []
         for key, label in subdisbut.items():
@@ -591,21 +832,21 @@ async def set_discipline(message: types.Message, state: FSMContext):
         )
         await state.set_state(OrderAnalysis.waiting_subdiscipline)
     else:
-        # Нет субдисциплин, сразу к матчу
         await message.answer(
-            "Введите матч (примеры: Team A vs Team B или Team A против Team B):",
+            "Введите название первой команды (или игрока):",
             reply_markup=types.ReplyKeyboardRemove()
         )
-        await state.set_state(OrderAnalysis.waiting_match)
+        await state.set_state(OrderAnalysis.waiting_team1)
 
 
 @dp.message(OrderAnalysis.waiting_subdiscipline)
 async def set_subdiscipline(message: types.Message, state: FSMContext):
-    """Обработчик выбора субдисциплины (для киберспорта)"""
     data = await state.get_data()
     subdiscipline_label = message.text.strip()
+    logging.info(f"User {message.from_user.id} selected subdiscipline: {subdiscipline_label}")
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID)
+    log_user_event(message.from_user.id, "select_subdiscipline", {"subdiscipline": subdiscipline_label})
     
-    # Найдем ключ по лейблу
     discipline = data.get('discipline', 'киберспорт')
     subdiscipline_key = None
     
@@ -617,15 +858,18 @@ async def set_subdiscipline(message: types.Message, state: FSMContext):
                 break
     
     if subdiscipline_key:
-        # Сохраняем полную дисциплину
         full_discipline = f"{discipline}: {subdiscipline_label}"
-        await state.update_data(subdiscipline=subdiscipline_key, full_discipline=full_discipline)
+        await state.update_data(
+            subdiscipline=subdiscipline_key, 
+            full_discipline=full_discipline,
+            discipline_key=subdiscipline_key  # Сохраняем ключ для промпта
+        )
         
         await message.answer(
-            f"🎮 Дисциплина: {subdiscipline_label}\n\nВведите матч (примеры: Team A vs Team B или Team A против Team B):",
+            f"🎮 Дисциплина: {subdiscipline_label}\n\nВведите название первой команды (или игрока):",
             reply_markup=types.ReplyKeyboardRemove()
         )
-        await state.set_state(OrderAnalysis.waiting_match)
+        await state.set_state(OrderAnalysis.waiting_team1)
     else:
         await message.answer("Пожалуйста, выберите из предложенных вариантов")
 
@@ -650,9 +894,13 @@ def get_date_keyboard() -> types.InlineKeyboardMarkup:
 
 
 def parse_match_sides(match_text: str) -> list[str]:
-    # Поддержка разных разделителей: "vs", "v", "против", "-"
-    parts = re.split(r"\s+(?:vs\.?|v\.?|против)\s+|\s*-\s*", match_text, flags=re.I)
-    return [part.strip() for part in parts if part.strip()]
+    return split_match_text(match_text)
+
+
+def format_name_correction(label: str, resolution: dict) -> str:
+    if not resolution.get("applied"):
+        return f"{label}: {resolution['corrected']}"
+    return f"{label}: {resolution['original']} -> {resolution['corrected']}"
 
 
 def build_annotation_block(match_text: str) -> str:
@@ -690,23 +938,167 @@ def split_long_message(text: str, max_length: int = 4000) -> list[str]:
     return [msg.strip() for msg in messages if msg.strip()]
 
 
-@dp.message(OrderAnalysis.waiting_match)
-async def set_match(message: types.Message, state: FSMContext):
-    match_text = message.text.strip()
-    parts = parse_match_sides(match_text)
+def is_admin_user(user_id: int) -> bool:
+    return user_id == ADMIN_TELEGRAM_ID
 
-    if len(parts) == 1:
-        await message.answer(
-            "Вы указали только одну команду или фамилию. Пожалуйста, укажите соперника или полный матч в формате 'Team A vs Team B' или 'Team A против Team B'."
+
+def format_stats_report() -> str:
+    stats = get_stats_summary()
+    discipline_lines = "\n".join(
+        f"- {discipline}: {count}" for discipline, count in stats["top_disciplines"]
+    ) or "- нет данных"
+    return (
+        "📊 Статистика бота\n\n"
+        f"Всего пользователей: {stats['total_users']}\n"
+        f"Активны за 24ч: {stats['active_day']}\n"
+        f"Активны за 7 дней: {stats['active_week']}\n"
+        f"Активны за 30 дней: {stats['active_month']}\n"
+        f"Всего запросов: {stats['total_requests']}\n"
+        f"Всего анализов: {stats['total_analyses']}\n"
+        f"Успешных анализов: {stats['successful_analyses']}\n"
+        f"Активных подписок: {stats['active_subscriptions']}\n\n"
+        "Топ дисциплин:\n"
+        f"{discipline_lines}"
+    )
+
+
+def format_recent_users_report() -> str:
+    users = list_recent_users(limit=20)
+    if not users:
+        return "Пользователей пока нет"
+
+    lines = ["👥 Последние пользователи"]
+    for user in users:
+        display_name = user.get("username") or user.get("first_name") or str(user["telegram_user_id"])
+        admin_mark = " [admin]" if user.get("is_admin") else ""
+        lines.append(
+            f"- {display_name} | id={user['telegram_user_id']} | last_seen={user['last_seen']} | req={user['requests_count']} | analyses={user['analyses_count']} | sub={user['subscription_status']}{admin_mark}"
         )
+    return "\n".join(lines)
+
+
+def format_user_details_report(telegram_user_id: int) -> str:
+    details = get_user_details(telegram_user_id)
+    if not details:
+        return f"Пользователь {telegram_user_id} не найден"
+
+    event_lines = []
+    for event in details["recent_events"]:
+        event_lines.append(f"- {event['event_time']} | {event['event_type']} | {event['details_json']}")
+
+    events_text = "\n".join(event_lines) if event_lines else "- нет событий"
+    return (
+        f"👤 Пользователь {telegram_user_id}\n\n"
+        f"username: {details.get('username')}\n"
+        f"first_name: {details.get('first_name')}\n"
+        f"last_name: {details.get('last_name')}\n"
+        f"first_seen: {details.get('first_seen')}\n"
+        f"last_seen: {details.get('last_seen')}\n"
+        f"requests_count: {details.get('requests_count')}\n"
+        f"analyses_count: {details.get('analyses_count')}\n"
+        f"successful_analyses: {details.get('successful_analyses')}\n"
+        f"subscription_status: {details.get('subscription_status')}\n"
+        f"subscription_until: {details.get('subscription_until')}\n"
+        f"last_discipline: {details.get('last_discipline')}\n"
+        f"last_match: {details.get('last_match')}\n"
+        f"is_admin: {bool(details.get('is_admin'))}\n\n"
+        "Последние события:\n"
+        f"{events_text}"
+    )
+
+
+async def deny_admin_access(message: types.Message) -> None:
+    await message.answer("⛔ Команда доступна только администратору")
+
+
+@dp.message(Command("stats"))
+async def admin_stats(message: types.Message):
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID)
+    if not is_admin_user(message.from_user.id):
+        await deny_admin_access(message)
+        return
+    log_user_event(message.from_user.id, "admin_stats")
+    await message.answer(format_stats_report())
+
+
+@dp.message(Command("users"))
+async def admin_users(message: types.Message):
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID)
+    if not is_admin_user(message.from_user.id):
+        await deny_admin_access(message)
+        return
+    log_user_event(message.from_user.id, "admin_users")
+    await message.answer(format_recent_users_report())
+
+
+@dp.message(Command("user"))
+async def admin_user_details(message: types.Message):
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID)
+    if not is_admin_user(message.from_user.id):
+        await deny_admin_access(message)
         return
 
-    await state.update_data(match=match_text)
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer("Использование: /user <telegram_user_id>")
+        return
+
+    target_user_id = int(parts[1].strip())
+    log_user_event(message.from_user.id, "admin_user_details", {"target_user_id": target_user_id})
+    await message.answer(format_user_details_report(target_user_id))
+
+
+@dp.message(OrderAnalysis.waiting_team1)
+async def set_team1(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    discipline = data.get('full_discipline') or data.get('discipline', '')
+    resolution = resolve_entity_name(message.text.strip(), discipline=discipline)
+    team1 = resolution["corrected"]
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, match_text=team1)
+    log_user_event(message.from_user.id, "set_team1", {"team1": team1, "original": resolution["original"], "reason": resolution["reason"]})
+    await state.update_data(team1=team1, team1_original=resolution["original"])
+    await message.answer(
+        f"1️⃣ {format_name_correction('Первая команда', resolution)}\n\nТеперь введите название второй команды (соперника):"
+    )
+    await state.set_state(OrderAnalysis.waiting_team2)
+
+
+@dp.message(OrderAnalysis.waiting_team2)
+async def set_team2(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    discipline = data.get('full_discipline') or data.get('discipline', '')
+    team1 = data.get('team1')
+    team2_resolution = resolve_entity_name(message.text.strip(), discipline=discipline)
+    team2 = team2_resolution["corrected"]
+    resolved_match = resolve_match_entities(team1, team2, discipline=discipline)
+    team1 = resolved_match["team1"]["corrected"]
+    team2 = resolved_match["team2"]["corrected"]
+    match_text = resolved_match["match"]
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, match_text=match_text)
+    log_user_event(
+        message.from_user.id,
+        "set_team2",
+        {
+            "team2": team2,
+            "team2_original": team2_resolution["original"],
+            "match": match_text,
+        },
+    )
+    await state.update_data(
+        team1=team1,
+        team2=team2,
+        team2_original=team2_resolution["original"],
+        match=match_text,
+    )
 
     # Показываем календарь для выбора даты
     keyboard = get_date_keyboard()
     await message.answer(
-        "📅 Выберите дату матча:",
+        (
+            f"🏆 Матч: {team1} vs {team2}\n"
+            f"{format_name_correction('Соперник', team2_resolution)}\n\n"
+            "📅 Выберите дату матча:"
+        ),
         reply_markup=keyboard
     )
     await state.set_state(OrderAnalysis.waiting_date)
@@ -715,28 +1107,76 @@ async def set_match(message: types.Message, state: FSMContext):
 @dp.callback_query(lambda c: c.data.startswith("date_"))
 async def handle_date_selection(callback: types.CallbackQuery, state: FSMContext):
     """Обработчик выбора даты через кнопку календаря"""
+    # Сразу отвечаем на колбэк, чтобы кнопка не "висела" нажатой и не истек таймаут Telegram
+    try:
+        await callback.answer()
+    except Exception as e:
+        logger.warning(f"Failed to answer callback query: {e}")
+
     data = await state.get_data()
     
     # Извлекаем дату из callback данных
     date_text = callback.data.replace("date_", "")
+    touch_user(callback.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID)
+    log_user_event(callback.from_user.id, "select_date", {"date": date_text})
     
     await state.update_data(date=date_text)
     
     # Редактируем сообщение - убираем клавиатуру
     await callback.message.edit_text(f"📅 Выбранная дата: {date_text}")
     
-    # Используем full_discipline если есть (с субдисциплиной), иначе обычную
-    discipline = data.get('full_discipline') or data.get('discipline', '')
-    
     # 🔍 Проверяем матч
-    clarification = check_match_clarification(
-        match_text=data['match'],
-        date_text=date_text,
-        user_discipline=discipline
+    discipline = data.get('full_discipline') or data.get('discipline', '')
+    team1 = data.get('team1')
+    team2 = data.get('team2')
+    
+    from services.match_finder import find_matches_by_teams, get_discipline_for_sport, normalize_discipline, parse_date
+    
+    target_date = parse_date(date_text)
+    matches = find_matches_by_teams(
+        team1=team1,
+        team2=team2,
+        target_date=target_date,
+        discipline=discipline,
+        days_range=3
     )
     
-    # Для callback нужно использовать callback.message вместо message
-    
+    clarification = None
+    if matches:
+        # Логика из check_match_clarification, но с учетом прямых команд
+        if len(matches) == 1:
+            match = matches[0]
+            actual_sport = match["sport"]
+            actual_discipline = get_discipline_for_sport(actual_sport)
+            requested_discipline = normalize_discipline(discipline)
+            
+            if actual_discipline != requested_discipline:
+                clarification = {
+                    "status": "discipline_mismatch",
+                    "message": f"⚠️ **Внимание:** матч найден в дисциплине '{actual_sport.upper()}', а не '{requested_discipline.upper()}'",
+                    "match": match,
+                    "needs_confirmation": True,
+                }
+            elif target_date:
+                actual_date = datetime.strptime(match["date"], "%Y-%m-%d")
+                if actual_date.date() != target_date.date():
+                    days_diff = (actual_date.date() - target_date.date()).days
+                    clarification = {
+                        "status": "date_mismatch",
+                        "message": f"⚠️ **Внимание:** матч найден на {match['date']} (разница {abs(days_diff)} дн.)",
+                        "match": match,
+                        "needs_confirmation": True,
+                    }
+            else:
+                clarification = {"status": "ok", "match": match, "needs_confirmation": False}
+        else:
+            clarification = {
+                "status": "multiple_matches",
+                "message": f"🔍 **Найдено {len(matches)} матчей:**",
+                "matches": matches,
+                "needs_confirmation": True,
+            }
+
     if clarification and clarification.get('needs_confirmation'):
         # Нужно уточнение
         confirmation_msg = format_match_confirmation(clarification)
@@ -757,11 +1197,18 @@ async def handle_date_selection(callback: types.CallbackQuery, state: FSMContext
         # Матч не найден в базе, но разрешаем анализ с доступными данными
         from services.match_finder import create_fallback_match_data
         
-        fallback_data = create_fallback_match_data(
-            match_text=data['match'],
-            date_text=date_text,
-            discipline=discipline
-        )
+        team1 = data.get('team1')
+        team2 = data.get('team2')
+        date_str = target_date.strftime("%Y-%m-%d") if target_date else date_text
+        
+        fallback_data = {
+            "sport": "unknown",
+            "home": team1,
+            "away": team2,
+            "date": date_str,
+            "league": "User Query",
+            "user_discipline": discipline,
+        }
         
         if fallback_data:
             await state.update_data(found_match=fallback_data)
@@ -776,65 +1223,94 @@ async def handle_date_selection(callback: types.CallbackQuery, state: FSMContext
             )
             await state.clear()
     
-    # Удаляем callback-led (уведомления в Telegram)
-    await callback.answer()
+    # Старый ответ в конце удаляем
+    # try:
+    #     await callback.answer()
+    # except Exception as e:
+    #     logger.warning(f"Failed to answer callback query: {e}")
 
 @dp.message(OrderAnalysis.waiting_date)
 async def check_match_text(message: types.Message, state: FSMContext):
     """Альтернативный обработчик - на случай если пользователь введет дату текстом"""
     data = await state.get_data()
     date_text = message.text.strip()
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID)
+    log_user_event(message.from_user.id, "input_date", {"date": date_text})
     
     await state.update_data(date=date_text)
     
     # Используем full_discipline если есть (с субдисциплиной), иначе обычную
     discipline = data.get('full_discipline') or data.get('discipline', '')
+    team1 = data.get('team1')
+    team2 = data.get('team2')
     
-    # 🔍 Проверяем матч
-    clarification = check_match_clarification(
-        match_text=data['match'],
-        date_text=date_text,
-        user_discipline=discipline
+    from services.match_finder import find_matches_by_teams, get_discipline_for_sport, normalize_discipline, parse_date
+    
+    target_date = parse_date(date_text)
+    matches = find_matches_by_teams(
+        team1=team1,
+        team2=team2,
+        target_date=target_date,
+        discipline=discipline,
+        days_range=3
     )
     
+    clarification = None
+    if matches:
+        if len(matches) == 1:
+            match = matches[0]
+            actual_sport = match["sport"]
+            actual_discipline = get_discipline_for_sport(actual_sport)
+            requested_discipline = normalize_discipline(discipline)
+            
+            if actual_discipline != requested_discipline:
+                clarification = {
+                    "status": "discipline_mismatch",
+                    "message": f"⚠️ **Внимание:** матч найден в дисциплине '{actual_sport.upper()}', а не '{requested_discipline.upper()}'",
+                    "match": match,
+                    "needs_confirmation": True,
+                }
+            elif target_date:
+                actual_date = datetime.strptime(match["date"], "%Y-%m-%d")
+                if actual_date.date() != target_date.date():
+                    days_diff = (actual_date.date() - target_date.date()).days
+                    clarification = {
+                        "status": "date_mismatch",
+                        "message": f"⚠️ **Внимание:** матч найден на {match['date']} (разница {abs(days_diff)} дн.)",
+                        "match": match,
+                        "needs_confirmation": True,
+                    }
+            else:
+                clarification = {"status": "ok", "match": match, "needs_confirmation": False}
+        else:
+            clarification = {
+                "status": "multiple_matches",
+                "message": f"🔍 **Найдено {len(matches)} матчей:**",
+                "matches": matches,
+                "needs_confirmation": True,
+            }
+    
     if clarification and clarification.get('needs_confirmation'):
-        # Нужно уточнение
         confirmation_msg = format_match_confirmation(clarification)
         await message.answer(confirmation_msg)
-        
-        # Сохраняем найденный матч в контексте
         if clarification.get('match'):
-            await state.update_data(
-                found_match=clarification['match'],
-                clarification_type=clarification['status']
-            )
-        
+            await state.update_data(found_match=clarification['match'])
         await state.set_state(OrderAnalysis.confirming_match)
     elif clarification and not clarification.get('needs_confirmation'):
-        # Матч в порядке, начинаем анализ
         await start_analysis(message, state)
     else:
-        # Матч не найден в базе, но разрешаем анализ с доступными данными
-        from services.match_finder import create_fallback_match_data
-        
-        fallback_data = create_fallback_match_data(
-            match_text=data['match'],
-            date_text=date_text,
-            discipline=discipline
-        )
-        
-        if fallback_data:
-            await state.update_data(found_match=fallback_data)
-            await message.answer(
-                f"📊 Анализирую матч: **{fallback_data['home']}** vs **{fallback_data['away']}** ({fallback_data['date']})"
-            )
-            await asyncio.sleep(0.5)
-            await start_analysis(message, state)
-        else:
-            await message.answer(
-                "❌ Не удалось разобрать данные матча. Пожалуйста, укажите матч в формате 'Team A vs Team B' или 'Team A против Team B'"
-            )
-            await state.clear()
+        date_str = target_date.strftime("%Y-%m-%d") if target_date else date_text
+        fallback_data = {
+            "sport": "unknown",
+            "home": team1,
+            "away": team2,
+            "date": date_str,
+            "league": "User Query",
+            "user_discipline": discipline,
+        }
+        await state.update_data(found_match=fallback_data)
+        await message.answer(f"📊 Анализирую матч: **{team1}** vs **{team2}** ({date_str})")
+        await start_analysis(message, state)
 
 
 @dp.message(OrderAnalysis.confirming_match)
@@ -842,6 +1318,8 @@ async def confirm_match(message: types.Message, state: FSMContext):
     """Обработчик подтверждения матча"""
     user_response = message.text.strip().lower()
     data = await state.get_data()
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID)
+    log_user_event(message.from_user.id, "confirm_match", {"response": user_response})
     
     if user_response in ["да", "yes", "y", "д", "ок", "ok"]:
         # Пользователь согласен, начинаем анализ
@@ -863,24 +1341,77 @@ async def start_analysis(message: types.Message, state: FSMContext):
     try:
         # Используем full_discipline если есть (с субдисциплиной)
         discipline = data.get('full_discipline') or data.get('discipline', 'киберспорт')
+        discipline_key = data.get('discipline_key')
+        found_match = data.get('found_match') or {}
+        analysis_match = data.get('match')
+
+        if found_match.get('home') and found_match.get('away'):
+            analysis_match = f"{found_match['home']} vs {found_match['away']}"
+
+        match_context = {
+            "date": found_match.get("date") or data.get("date"),
+            "league": found_match.get("league", ""),
+            "sport": found_match.get("sport", ""),
+            "home": found_match.get("home", ""),
+            "away": found_match.get("away", ""),
+        }
+        touch_user(
+            message.from_user,
+            admin_telegram_id=ADMIN_TELEGRAM_ID,
+            discipline=discipline,
+            match_text=analysis_match,
+        )
+        log_user_event(
+            message.from_user.id,
+            "analysis_started",
+            {"discipline": discipline, "match": analysis_match, "date": match_context.get("date")},
+        )
+        context_block = "\n".join(
+            line for line in [
+                f"Подтвержденный матч: {analysis_match}" if analysis_match else "",
+                f"Дата матча: {match_context['date']}" if match_context.get('date') else "",
+                f"Лига/турнир: {match_context['league']}" if match_context.get('league') else "",
+            ] if line
+        )
         
         # 🔥 получаем структурированные данные
-        search_data = await get_match_data(
-            data['match'],
-            discipline
-        )
+        try:
+            search_data = await asyncio.wait_for(
+                get_match_data(
+                    analysis_match,
+                    discipline,
+                    match_context=match_context,
+                ),
+                timeout=25,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Timed out collecting search data for %s", analysis_match)
+            search_data = (
+                f"Матч: {analysis_match}\n"
+                f"Дата: {match_context.get('date') or 'не указана'}\n"
+                "Быстрый сбор подтвержденных источников занял слишком много времени. "
+                "Продолжай анализ на основе уже известных вводных и явно пометь ограничения по данным."
+            )
 
-        annotation_block = build_annotation_block(data['match'])
+        annotation_block = build_annotation_block(analysis_match)
+        request_payload = f"{search_data}\n\n{context_block}\n\n{annotation_block}" if context_block else f"{search_data}\n\n{annotation_block}"
 
         # 🔥 генерим ответ с оптимизированным system prompt
-        response_text = generate_content(
-            f"{search_data}\n\n{annotation_block}",
-            discipline=discipline
+        response_text = await generate_content(
+            request_payload,
+            discipline=discipline,
+            discipline_key=discipline_key
         )
 
         await status.delete()
 
         if response_text:
+            record_analysis_result(
+                message.from_user.id,
+                discipline=discipline,
+                match_text=analysis_match,
+                success=True,
+            )
             # 💰 Извлекаем вероятность и рекомендацию по ставке
             from services.betting_calculator import get_bet_recommendation
             probability, bet_recommendation = get_bet_recommendation(response_text)
@@ -900,16 +1431,30 @@ async def start_analysis(message: types.Message, state: FSMContext):
                     logging.error(f"Error sending message part {i+1}: {e}")
                     await message.answer(f"⚠️ Ошибка отправки части {i+1}")
         else:
+            record_analysis_result(
+                message.from_user.id,
+                discipline=discipline,
+                match_text=analysis_match,
+                success=False,
+            )
             await message.answer("⚠️ Нет ответа от модели")
 
     except Exception as e:
         logging.error(e)
+        record_analysis_result(
+            message.from_user.id,
+            discipline=data.get('full_discipline') or data.get('discipline'),
+            match_text=data.get('match'),
+            success=False,
+        )
+        log_user_event(message.from_user.id, "analysis_exception", {"error": str(e)})
         await message.answer(f"❌ Ошибка: {str(e)}")
 
     await state.clear()
 
 # --- RUN ---
 async def main():
+    init_user_store()
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
   

@@ -1,9 +1,12 @@
 aiogram
 google-genai
 groq
+openai
 hltv
 python-dotenv
 requests
 beautifulsoup4
 lxml
 cloudscraper
+duckduckgo-search
+ddgs

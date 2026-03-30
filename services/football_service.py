@@ -7,6 +7,17 @@ from services.data_fetcher import FootballFetcher
 logger = logging.getLogger(__name__)
 
 
+def has_validated_data(result: str) -> bool:
+    return bool(result) and "Валидация: validated" in result and "Подтверждено источников:" in result
+
+
+def build_context_terms(match_context: dict | None, opponent: str) -> str:
+    if not match_context:
+        return opponent
+    parts = [opponent, match_context.get("date", ""), match_context.get("league", "")]
+    return " ".join(part for part in parts if part)
+
+
 def normalize_match_name(match_name: str) -> str:
     return re.sub(r"\s+", " ", match_name.strip())
 
@@ -50,7 +61,7 @@ def parse_football_fallback(match_name: str) -> str:
 """
 
 
-def fetch_football_real_data(match_name: str) -> str:
+def fetch_football_real_data(match_name: str, match_context: dict | None = None) -> str:
     """
     Fetch real football match data from WhoScored, SofaScore, Transfermarkt.
     
@@ -68,12 +79,14 @@ def fetch_football_real_data(match_name: str) -> str:
 
         home_team = teams[0].strip()
         away_team = teams[1].strip()
+        home_context = build_context_terms(match_context, away_team)
+        away_context = build_context_terms(match_context, home_team)
         
         fetcher = FootballFetcher()
         
         # Fetch team info
-        home_info = fetcher.fetch_team_info(home_team)
-        away_info = fetcher.fetch_team_info(away_team)
+        home_info = fetcher.fetch_team_info(home_team, context_terms=home_context)
+        away_info = fetcher.fetch_team_info(away_team, context_terms=away_context)
 
         # Format data for LLM analysis
         result = f"""
@@ -155,10 +168,10 @@ def parse_football_external(match_name: str) -> str:
 """
 
 
-def get_football_data(match_name: str) -> str:
+def get_football_data(match_name: str, match_context: dict | None = None) -> str:
     # Try to fetch real data from multiple sources
-    result = fetch_football_real_data(match_name)
-    if result and "Загрузка данных..." not in result:
+    result = fetch_football_real_data(match_name, match_context=match_context)
+    if has_validated_data(result):
         return result
 
     # Fall back to external sources

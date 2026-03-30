@@ -7,6 +7,17 @@ from services.data_fetcher import TennisFetcher
 logger = logging.getLogger(__name__)
 
 
+def has_validated_data(result: str) -> bool:
+    return bool(result) and "Валидация: validated" in result and "Подтверждено источников:" in result
+
+
+def build_context_terms(match_context: dict | None, opponent: str) -> str:
+    if not match_context:
+        return opponent
+    parts = [opponent, match_context.get("date", ""), match_context.get("league", "")]
+    return " ".join(part for part in parts if part)
+
+
 def normalize_match_name(match_name: str) -> str:
     return re.sub(r"\s+", " ", match_name.strip())
 
@@ -55,7 +66,7 @@ H2H: важно учитывать личные встречи
 """
 
 
-def fetch_tennis_real_data(match_name: str) -> str:
+def fetch_tennis_real_data(match_name: str, match_context: dict | None = None) -> str:
     """Fetch real tennis match data from ATP/WTA and Tennis Explorer."""
     try:
         players = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_name, flags=re.I)
@@ -64,10 +75,12 @@ def fetch_tennis_real_data(match_name: str) -> str:
 
         player1 = players[0].strip()
         player2 = players[1].strip()
+        player1_context = build_context_terms(match_context, player2)
+        player2_context = build_context_terms(match_context, player1)
         
         fetcher = TennisFetcher()
-        player1_info = fetcher.fetch_player_info(player1)
-        player2_info = fetcher.fetch_player_info(player2)
+        player1_info = fetcher.fetch_player_info(player1, context_terms=player1_context)
+        player2_info = fetcher.fetch_player_info(player2, context_terms=player2_context)
 
         result = f"""
 🎾 **Матч:** {player1.upper()} vs {player2.upper()}
@@ -143,16 +156,16 @@ def parse_tennis_external(match_name: str) -> str:
 """
 
 
-def get_tennis_data(match_name: str, subdiscipline: str = "tennis") -> str:
+def get_tennis_data(match_name: str, subdiscipline: str = "tennis", match_context: dict | None = None) -> str:
     # Выбираем логику в зависимости от дисциплины (большой теннис или настольный)
     if subdiscipline == "table_tennis":
         # Даже если выбран большой теннис, может переключиться на настольный
         from services.table_tennis_service import get_table_tennis_data
-        return get_table_tennis_data(match_name)
+        return get_table_tennis_data(match_name, match_context=match_context)
     
     # Try to fetch real data
-    result = fetch_tennis_real_data(match_name)
-    if result and "Данные загружаются..." not in result:
+    result = fetch_tennis_real_data(match_name, match_context=match_context)
+    if has_validated_data(result):
         return result
 
     # Fall back to external sources
