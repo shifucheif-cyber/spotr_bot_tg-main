@@ -360,6 +360,43 @@ class HockeyFetcher(DataFetcher):
         return {"source": "NST", "status": "searching"}
 
 
+class TableTennisFetcher(DataFetcher):
+    """Fetch table tennis data from ITTF, Flashscore, StatsTable."""
+
+    ITTF_BASE = "https://www.ittfworld.com"
+    FLASHSCORE_BASE = "https://www.flashscore.com"
+    STATSBOMB_BASE = "https://www.statsbomb.com"
+
+    def fetch_player_info(self, player_name: str) -> Optional[Dict[str, Any]]:
+        """Fetch table tennis player information."""
+        try:
+            logger.info(f"Fetching table tennis info for {player_name}")
+            
+            return {
+                "sources": {
+                    "ittf": self._fetch_ittf(player_name),
+                    "flashscore": self._fetch_flashscore(player_name),
+                    "statsbomb": self._fetch_statsbomb(player_name)
+                },
+                "player": player_name
+            }
+        except Exception as e:
+            logger.error(f"Error fetching table tennis info for {player_name}: {e}")
+            return None
+
+    def _fetch_ittf(self, player_name: str) -> Dict[str, Any]:
+        """Fetch from ITTF World Rankings."""
+        return {"source": "ITTF", "status": "searching"}
+
+    def _fetch_flashscore(self, player_name: str) -> Dict[str, Any]:
+        """Fetch from Flashscore Table Tennis."""
+        return {"source": "Flashscore", "status": "searching"}
+
+    def _fetch_statsbomb(self, player_name: str) -> Dict[str, Any]:
+        """Fetch from StatsTable/StatsStats."""
+        return {"source": "StatsTable", "status": "searching"}
+
+
 class VolleyballFetcher(DataFetcher):
     """Fetch volleyball data from WorldofVolley, Volleybox."""
 
@@ -400,6 +437,8 @@ def get_fetcher(discipline: str) -> Optional[DataFetcher]:
         return CS2Fetcher()
     elif "футбол" in d or "football" in d or "soccer" in d:
         return FootballFetcher()
+    elif "table" in d or "настольный" in d or "table_tennis" in d:
+        return TableTennisFetcher()
     elif "теннис" in d or "tennis" in d:
         return TennisFetcher()
     elif "мма" in d or "бокс" in d or "boxing" in d or "fighting" in d:

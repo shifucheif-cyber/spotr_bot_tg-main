@@ -143,7 +143,13 @@ def parse_tennis_external(match_name: str) -> str:
 """
 
 
-def get_tennis_data(match_name: str) -> str:
+def get_tennis_data(match_name: str, subdiscipline: str = "tennis") -> str:
+    # Выбираем логику в зависимости от дисциплины (большой теннис или настольный)
+    if subdiscipline == "table_tennis":
+        # Даже если выбран большой теннис, может переключиться на настольный
+        from services.table_tennis_service import get_table_tennis_data
+        return get_table_tennis_data(match_name)
+    
     # Try to fetch real data
     result = fetch_tennis_real_data(match_name)
     if result and "Данные загружаются..." not in result:

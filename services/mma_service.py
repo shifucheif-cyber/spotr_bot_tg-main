@@ -137,7 +137,12 @@ def format_mma_data(fighter_info: dict) -> str:
     return "\n".join(lines) if lines else "Данные загружаются..."
 
 
-def get_mma_data(fight_name: str) -> str:
+def get_mma_data(fight_name: str, subdiscipline: str = "mma") -> str:
+    # Выбираем логику в зависимости от дисциплины (ММА или Бокс)
+    if subdiscipline == "boxing":
+        # TODO: В будущем добавить специфичную логику для бокса
+        pass
+    
     # Try to fetch real data
     result = fetch_mma_real_data(fight_name)
     if result and "Данные загружаются из" in result:

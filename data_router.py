@@ -10,27 +10,48 @@ from services.basketball_service import get_basketball_data
 async def get_match_data(match, discipline):
     d = discipline.lower()
 
-    if "киберспорт" in d or "cs" in d or "dota" in d or "lol" in d or "esport" in d:
+    # КИБЕРСПОРТ - маршрутизация конкретной игры
+    if "киберспорт" in d or "cs2" in d or "cs:" in d:
+        return get_esports_data(match, discipline)
+    elif "dota" in d or "dota2" in d or "dota:" in d:
+        return get_esports_data(match, discipline)
+    elif "lol" in d or "league" in d or "lol:" in d:
+        return get_esports_data(match, discipline)
+    elif "valorant" in d or "valorant:" in d:
         return get_esports_data(match, discipline)
 
+    # ФУТБОЛ
     elif "футбол" in d or "football" in d or "soccer" in d:
         return get_football_data(match)
 
+    # ХОККЕЙ
     elif "хоккей" in d or "hockey" in d:
         return get_hockey_data(match)
 
-    elif "настольный теннис" in d or "table tennis" in d:
+    # ТЕННИС - большой теннис или настольный
+    elif "теннис:" in d and "настольный" in d:
+        # Настольный теннис
         return get_table_tennis_data(match)
-
+    elif "table" in d or "настольный" in d or "table_tennis" in d:
+        return get_table_tennis_data(match)
     elif "теннис" in d or "tennis" in d:
+        # Большой теннис (по умолчанию)
         return get_tennis_data(match)
 
-    elif "mma" in d or "мма" in d or "бокс" in d or "box" in d:
-        return get_mma_data(match)
+    # ММА/БОКС - выбор между ММА и Бокс
+    elif "ммА:" in d and "бокс" in d:
+        # Бокс
+        return get_mma_data(match, subdiscipline="boxing")
+    elif "boxing" in d or "бокс" in d:
+        return get_mma_data(match, subdiscipline="boxing")
+    elif "mma" in d or "мма" in d:
+        return get_mma_data(match, subdiscipline="mma")
 
+    # ВОЛЕЙБОЛ
     elif "волейбол" in d or "volleyball" in d:
         return get_volleyball_data(match)
 
+    # БАСКЕТБОЛ
     elif "баскетбол" in d or "basketball" in d:
         return get_basketball_data(match)
 

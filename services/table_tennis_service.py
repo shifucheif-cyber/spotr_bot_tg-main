@@ -2,7 +2,7 @@ import re
 import logging
 
 from services.external_source import search_event_thesportsdb
-from services.data_fetcher import TennisFetcher
+from services.data_fetcher import TableTennisFetcher
 
 logger = logging.getLogger(__name__)
 

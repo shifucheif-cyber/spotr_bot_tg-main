@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.context import FSMContext
@@ -255,12 +256,12 @@ DISCIPLINE_PROMPTS = {
 
 Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
 
-    "теннис": """Ты - профессиональный аналитик теннисных матчей.
+    "tennis": """Ты - профессиональный аналитик большого тенниса.
 Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
 - рейтингах WTA/ATP
-- истории личных встреч (H2H)
-- покрытии и условиях
-- текущей форме игроков
+- истории личных встреч (H2H) и результатах
+- покрытии и условиях игры
+- текущей форме и последних турнирах
 
 Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
 
@@ -282,12 +283,30 @@ DISCIPLINE_PROMPTS = {
 
 Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
 
-    "мма/бокс": """Ты - профессиональный аналитик боевых видов спорта.
-Анализируй ТОЛЬКО указанный поединок, используя ПОЛУЧЕННые данные о:
-- рекордах и истории боев
-- стиле и технике бойцов
-- антропометрии и весогонке
-- формах и мотивации
+    "мма": """Ты - профессиональный аналитик ММА поединков.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- рекордах и стиле бойцов (нокауты, подмышки, решения)
+- боевых опыте и уровне соперничества
+- весовой категории и условиях боя
+- последних победах/поражениях и мотивации
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "boxing": """Ты - профессиональный аналитик боксёрских матчей.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- боксёрских рекордах и стиле (бокс, свинг, апперкот)
+- опыте соперниках и титулах
+- весовой категории и условиях боя
+- последних боях и физическом состоянии
+
+Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
+
+    "table_tennis": """Ты - профессиональный аналитик настольного тенниса.
+Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
+- рейтингах ITTF
+- истории личных встреч и результатах
+- стиле игры (защита/атака) и технике
+- текущей форме и последних турнирах
 
 Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
 
@@ -300,14 +319,6 @@ DISCIPLINE_PROMPTS = {
 
 Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
 
-    "настольный теннис": """Ты - профессиональный аналитик настольного тенниса.
-Анализируй ТОЛЬКО указанный матч, используя ПОЛУЧЕННые данные о:
-- рейтингах игроков
-- истории личных встреч
-- стиле игры и технике
-- текущей форме и последних результатах
-
-Дай четкий прогноз с вероятностью и рекомендацией ставки.""",
 }
 
 def get_discipline_prompt(discipline: str) -> str:
@@ -446,12 +457,24 @@ DISCIPLINE_HIERARCHY = {
             "valorant": "Valorant"
         }
     },
+    "теннис": {
+        "has_subdisciplines": True,
+        "options": {
+            "tennis": "Большой теннис",
+            "table_tennis": "Настольный теннис"
+        }
+    },
+    "мма/бокс": {
+        "has_subdisciplines": True,
+        "options": {
+            "mma": "ММА",
+            "boxing": "Бокс"
+        }
+    },
     "футбол": {"has_subdisciplines": False},
     "хоккей": {"has_subdisciplines": False},
     "баскетбол": {"has_subdisciplines": False},
-    "теннис": {"has_subdisciplines": False},
     "настольный теннис": {"has_subdisciplines": False},
-    "мма/бокс": {"has_subdisciplines": False},
     "волейбол": {"has_subdisciplines": False},
 }
 
@@ -460,9 +483,9 @@ DISCIPLINE_HIERARCHY = {
 async def start(message: types.Message, state: FSMContext):
     kb = [
         [types.KeyboardButton(text="киберспорт"), types.KeyboardButton(text="Футбол")],
-        [types.KeyboardButton(text="Теннис"), types.KeyboardButton(text="Настольный теннис")],
-        [types.KeyboardButton(text="ММА/Бокс"), types.KeyboardButton(text="Волейбол")],
-        [types.KeyboardButton(text="Хоккей"), types.KeyboardButton(text="Баскетбол")]
+        [types.KeyboardButton(text="Теннис"), types.KeyboardButton(text="ММА/Бокс")],
+        [types.KeyboardButton(text="Волейбол"), types.KeyboardButton(text="Хоккей")],
+        [types.KeyboardButton(text="Баскетбол")]
     ]
 
     keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -472,7 +495,7 @@ async def start(message: types.Message, state: FSMContext):
 
 @dp.message(OrderAnalysis.waiting_discipline)
 async def set_discipline(message: types.Message, state: FSMContext):
-    discipline = message.text.strip()
+    discipline = message.text.strip().lower()  # ✅ Приводим к нижнему регистру
     await state.update_data(discipline=discipline)
 
     # Проверяем, есть ли субдисциплины
@@ -528,6 +551,26 @@ async def set_subdiscipline(message: types.Message, state: FSMContext):
     else:
         await message.answer("Пожалуйста, выберите из предложенных вариантов")
 
+def get_date_keyboard() -> types.InlineKeyboardMarkup:
+    """Создает клавиатуру с датами на 7 дней от сегодня"""
+    today = datetime(2026, 3, 30)  # Фиксированная дата сегодня
+    
+    kb = []
+    for i in range(7):
+        date = today + timedelta(days=i)
+        date_str = date.strftime("%d.%m.%y")
+        day_name = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][date.weekday()]
+        
+        if i == 0:
+            label = f"Сегодня ({date_str})"
+        else:
+            label = f"{day_name} {date_str}"
+        
+        kb.append([types.InlineKeyboardButton(text=label, callback_data=f"date_{date_str}")])
+    
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 def parse_match_sides(match_text: str) -> list[str]:
     parts = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_text, flags=re.I)
     return [part.strip() for part in parts if part.strip()]
@@ -581,12 +624,85 @@ async def set_match(message: types.Message, state: FSMContext):
 
     await state.update_data(match=match_text)
 
-    await message.answer("Введите дату:")
+    # Показываем календарь для выбора даты
+    keyboard = get_date_keyboard()
+    await message.answer(
+        "📅 Выберите дату матча:",
+        reply_markup=keyboard
+    )
     await state.set_state(OrderAnalysis.waiting_date)
 
+
+@dp.callback_query(lambda c: c.data.startswith("date_"))
+async def handle_date_selection(callback: types.CallbackQuery, state: FSMContext):
+    """Обработчик выбора даты через кнопку календаря"""
+    data = await state.get_data()
+    
+    # Извлекаем дату из callback данных
+    date_text = callback.data.replace("date_", "")
+    
+    await state.update_data(date=date_text)
+    
+    # Редактируем сообщение - убираем клавиатуру
+    await callback.message.edit_text(f"📅 Выбранная дата: {date_text}")
+    
+    # Используем full_discipline если есть (с субдисциплиной), иначе обычную
+    discipline = data.get('full_discipline') or data.get('discipline', '')
+    
+    # 🔍 Проверяем матч
+    clarification = check_match_clarification(
+        match_text=data['match'],
+        date_text=date_text,
+        user_discipline=discipline
+    )
+    
+    # Для callback нужно использовать callback.message вместо message
+    
+    if clarification and clarification.get('needs_confirmation'):
+        # Нужно уточнение
+        confirmation_msg = format_match_confirmation(clarification)
+        await callback.message.answer(confirmation_msg)
+        
+        # Сохраняем найденный матч в контексте
+        if clarification.get('match'):
+            await state.update_data(
+                found_match=clarification['match'],
+                clarification_type=clarification['status']
+            )
+        
+        await state.set_state(OrderAnalysis.confirming_match)
+    elif clarification and not clarification.get('needs_confirmation'):
+        # Матч в порядке, начинаем анализ
+        await start_analysis(callback.message, state)
+    else:
+        # Матч не найден в базе, но разрешаем анализ с доступными данными
+        from services.match_finder import create_fallback_match_data
+        
+        fallback_data = create_fallback_match_data(
+            match_text=data['match'],
+            date_text=date_text,
+            discipline=discipline
+        )
+        
+        if fallback_data:
+            await state.update_data(found_match=fallback_data)
+            await callback.message.answer(
+                f"📊 Анализирую матч: **{fallback_data['home']}** vs **{fallback_data['away']}** ({fallback_data['date']})"
+            )
+            await asyncio.sleep(0.5)
+            await start_analysis(callback.message, state)
+        else:
+            await callback.message.answer(
+                "❌ Не удалось разобрать данные матча. Пожалуйста, укажите матч в формате 'Team A vs Team B'"
+            )
+            await state.clear()
+    
+    # Удаляем callback-led (уведомления в Telegram)
+    await callback.answer()
+
 @dp.message(OrderAnalysis.waiting_date)
-async def check_match(message: types.Message, state: FSMContext):
-    """Проверяет матч перед началом анализа (дисциплина и дата)"""
+async def check_match_text(message: types.Message, state: FSMContext):
+    """Альтернативный обработчик - на случай если пользователь введет дату текстом"""
     data = await state.get_data()
     date_text = message.text.strip()
     
