@@ -10,7 +10,11 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from services.name_normalizer import expand_context_terms, get_search_variants, normalize_entity_name, transliterate_text
+from services.name_normalizer import expand_context_terms, get_search_variants, normalize_entity_name, split_match_text, transliterate_text
+try:
+    from tavily import TavilyClient
+except ImportError:
+    TavilyClient = None
 try:
     from ddgs import DDGS
 except ImportError:
@@ -23,12 +27,17 @@ REQUEST_HEADERS = {
 }
 REQUEST_TIMEOUT = 10
 GOOGLE_SEARCH_URL = "https://www.google.com/search"
-ENABLE_GOOGLE_SEARCH = os.getenv("ENABLE_GOOGLE_SEARCH", "false").strip().lower() in {"1", "true", "yes", "on"}
+ENABLE_GOOGLE_SEARCH = os.getenv("ENABLE_GOOGLE_SEARCH", "true").strip().lower() in {"1", "true", "yes", "on"}
 SEARCH_MAX_SITES = max(1, int(os.getenv("SEARCH_MAX_SITES", "4")))
 SEARCH_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_RESULTS_PER_QUERY", "1")))
 SEARCH_ENABLE_BROAD_WINDOW = os.getenv("SEARCH_ENABLE_BROAD_WINDOW", "false").strip().lower() in {"1", "true", "yes", "on"}
 SEARCH_DDGS_BACKEND = os.getenv("SEARCH_DDGS_BACKEND", "duckduckgo")
 SEARCH_REGION = os.getenv("SEARCH_REGION", "ru-ru")
+EXA_API_KEY = os.getenv("EXA_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+SEARCH_ANALYSIS_PROVIDER = os.getenv("SEARCH_ANALYSIS_PROVIDER", "hybrid").strip().lower()
+SEARCH_ANALYSIS_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_ANALYSIS_RESULTS_PER_QUERY", "2")))
+SEARCH_ANALYSIS_MAX_SNIPPETS = max(1, int(os.getenv("SEARCH_ANALYSIS_MAX_SNIPPETS", "4")))
 GOOGLE_BACKOFF_SECONDS = max(60, int(os.getenv("GOOGLE_BACKOFF_SECONDS", "900")))
 _google_backoff_until = 0.0
 RUSSIAN_CONTEXT_HINTS = {
@@ -174,6 +183,36 @@ DISCIPLINE_SITES = {
     for discipline, entries in DISCIPLINE_SOURCE_CONFIG.items()
 }
 
+DISCIPLINE_VALIDATION_ALIASES = {
+    "football": "football",
+    "soccer": "football",
+    "футбол": "football",
+    "hockey": "hockey",
+    "хоккей": "hockey",
+    "basketball": "basketball",
+    "баскетбол": "basketball",
+    "tennis": "tennis",
+    "теннис": "tennis",
+    "table tennis": "table_tennis",
+    "table_tennis": "table_tennis",
+    "настольный теннис": "table_tennis",
+    "volleyball": "volleyball",
+    "волейбол": "volleyball",
+    "mma": "mma",
+    "мма": "mma",
+    "boxing": "boxing",
+    "бокс": "boxing",
+    "cs2": "cs2",
+    "cs 2": "cs2",
+    "counter-strike 2": "cs2",
+    "counter strike 2": "cs2",
+    "dota2": "dota2",
+    "dota 2": "dota2",
+    "lol": "lol",
+    "league of legends": "lol",
+    "valorant": "valorant",
+}
+
 CYRILLIC_TO_LATIN = str.maketrans({
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
     "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
@@ -316,6 +355,17 @@ def _build_site_queries(entity: str, site: str, stat_type: str, context_terms: O
     return deduplicated
 
 
+def _normalize_validation_discipline_key(discipline: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (discipline or "").strip().lower())
+    if ":" in cleaned:
+        parts = [part.strip() for part in cleaned.split(":") if part.strip()]
+        if parts:
+            cleaned = parts[-1]
+    if cleaned in DISCIPLINE_SOURCE_CONFIG:
+        return cleaned
+    return DISCIPLINE_VALIDATION_ALIASES.get(cleaned, cleaned)
+
+
 def _google_is_available() -> bool:
     return ENABLE_GOOGLE_SEARCH and time.monotonic() >= _google_backoff_until
 
@@ -433,21 +483,195 @@ def search_with_google(query: str, num_results: int = 5) -> List[Dict[str, Any]]
 
 
 def _merge_search_results(query: str, timelimit: Optional[str]) -> List[Dict[str, Any]]:
+    google_results = search_with_google(query, num_results=SEARCH_RESULTS_PER_QUERY)
+    for result in google_results:
+        result.setdefault("search_engine", "google")
+
     ddg_results = search_with_ddgs(query, num_results=SEARCH_RESULTS_PER_QUERY, timelimit=timelimit)
     for result in ddg_results:
         result.setdefault("search_engine", "duckduckgo")
 
-    google_results = search_with_google(query, num_results=SEARCH_RESULTS_PER_QUERY)
-
     merged: List[Dict[str, Any]] = []
     seen_urls = set()
-    for result in ddg_results + google_results:
+    for result in google_results + ddg_results:
         url = result.get("href", "")
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
         merged.append(result)
     return merged
+
+
+def _search_with_exa(query: str, include_domains: List[str], num_results: int = 3) -> Dict[str, Any]:
+    if not EXA_API_KEY:
+        return {"answer": "", "results": []}
+
+    payload: Dict[str, Any] = {
+        "query": query,
+        "numResults": num_results,
+        "contents": {"text": {"maxCharacters": 900}},
+    }
+    if include_domains:
+        payload["includeDomains"] = include_domains
+
+    try:
+        response = requests.post(
+            "https://api.exa.ai/search",
+            headers={
+                "x-api-key": EXA_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        logger.warning("Exa analysis search failed for query '%s': %s", query, exc)
+        return {"answer": "", "results": []}
+
+    results: List[Dict[str, Any]] = []
+    for item in data.get("results", []):
+        snippet = (item.get("text") or "").strip()
+        if not snippet:
+            highlights = item.get("highlights") or []
+            if isinstance(highlights, list):
+                snippet = " ".join(str(highlight).strip() for highlight in highlights if highlight).strip()
+        results.append(
+            {
+                "title": (item.get("title") or "").strip(),
+                "body": snippet,
+                "href": (item.get("url") or "").strip(),
+                "search_engine": "exa",
+            }
+        )
+
+    return {"answer": "", "results": results}
+
+
+def _search_with_tavily(query: str, include_domains: List[str], num_results: int = 3) -> Dict[str, Any]:
+    if not TAVILY_API_KEY or TavilyClient is None:
+        return {"answer": "", "results": []}
+
+    client = TavilyClient(api_key=TAVILY_API_KEY)
+    try:
+        response = client.search(
+            query=query,
+            topic="general",
+            search_depth="advanced",
+            max_results=num_results,
+            include_domains=include_domains or None,
+            include_answer=True,
+            include_raw_content=False,
+        )
+    except Exception as exc:
+        logger.warning("Tavily analysis search failed for query '%s': %s", query, exc)
+        return {"answer": "", "results": []}
+
+    results: List[Dict[str, Any]] = []
+    for item in response.get("results", []):
+        results.append(
+            {
+                "title": (item.get("title") or "").strip(),
+                "body": (item.get("content") or item.get("snippet") or "").strip(),
+                "href": (item.get("url") or "").strip(),
+                "search_engine": "tavily",
+            }
+        )
+
+    answer = (response.get("answer") or "").strip()
+    return {"answer": answer, "results": results}
+
+
+def _analysis_providers() -> List[str]:
+    provider = SEARCH_ANALYSIS_PROVIDER
+    if provider == "exa":
+        return ["exa"]
+    if provider == "tavily":
+        return ["tavily"]
+    return ["exa", "tavily"]
+
+
+def _merge_analysis_results(query: str, include_domains: List[str]) -> Dict[str, Any]:
+    merged: List[Dict[str, Any]] = []
+    seen_urls = set()
+    answers: List[str] = []
+
+    for provider in _analysis_providers():
+        payload = _search_with_exa(query, include_domains, SEARCH_ANALYSIS_RESULTS_PER_QUERY) if provider == "exa" else _search_with_tavily(query, include_domains, SEARCH_ANALYSIS_RESULTS_PER_QUERY)
+        answer = (payload.get("answer") or "").strip()
+        if answer:
+            answers.append(f"{provider}: {answer}")
+
+        for result in payload.get("results") or []:
+            url = result.get("href", "")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            merged.append(result)
+
+    return {"answers": answers, "results": merged}
+
+
+def _collect_analysis_sources(
+    entity: str,
+    discipline: str,
+    stat_type: str,
+    context_terms: Optional[str],
+    sites: List[str],
+) -> Dict[str, Any]:
+    snippets: List[Dict[str, Any]] = []
+    answers: List[str] = []
+    used_engines = set()
+    normalized_answers = set()
+
+    if not sites:
+        return {"answers": [], "snippets": [], "used_engines": []}
+
+    for site in sites[:2]:
+        queries = _build_site_queries(entity, site, stat_type, context_terms)
+        for query in queries[:1]:
+            payload = _merge_analysis_results(query, [site])
+
+            for answer in payload.get("answers", []):
+                key = answer.lower()
+                if key in normalized_answers:
+                    continue
+                normalized_answers.add(key)
+                answers.append(answer)
+
+            for result in payload.get("results", []):
+                url = result.get("href", "")
+                title = result.get("title", "")
+                body = result.get("body", "")
+                if not _is_result_valid(entity, title, body, ""):
+                    continue
+
+                engine = result.get("search_engine", "unknown")
+                used_engines.add(engine)
+                snippets.append(
+                    {
+                        "site": site,
+                        "query": query,
+                        "search_engine": engine,
+                        "title": title,
+                        "body": (body or "")[:260],
+                        "href": url,
+                    }
+                )
+                if len(snippets) >= SEARCH_ANALYSIS_MAX_SNIPPETS:
+                    break
+
+            if len(snippets) >= SEARCH_ANALYSIS_MAX_SNIPPETS:
+                break
+        if len(snippets) >= SEARCH_ANALYSIS_MAX_SNIPPETS:
+            break
+
+    return {
+        "answers": answers[:4],
+        "snippets": snippets,
+        "used_engines": sorted(used_engines),
+    }
 
 
 def collect_validated_sources(
@@ -509,16 +733,90 @@ def collect_validated_sources(
         if len(validated_sources) >= min_sources:
             break
 
+    analysis_sources = _collect_analysis_sources(
+        entity,
+        discipline,
+        stat_type,
+        context_terms,
+        sites,
+    )
+
     return {
         "entity": entity,
         "discipline": discipline,
         "stat_type": stat_type,
+        "min_sources": min_sources,
         "freshness_window": used_window,
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "validated_sources": validated_sources,
+        "analysis_sources": analysis_sources,
         "validated_count": len(validated_sources),
         "enough_sources": len(validated_sources) >= min_sources,
         "status": "validated" if len(validated_sources) >= min_sources else "insufficient_sources",
+    }
+
+
+def validate_match_request(match_text: str, date_text: str, discipline: str) -> Dict[str, Any]:
+    sides = split_match_text(match_text)
+    if len(sides) != 2:
+        return {
+            "status": "invalid_match",
+            "match": None,
+            "report": "Валидация: неверный формат матча.",
+        }
+
+    discipline_key = _normalize_validation_discipline_key(discipline)
+    if discipline_key not in DISCIPLINE_SOURCE_CONFIG:
+        return {
+            "status": "unsupported_discipline",
+            "match": None,
+            "report": f"Валидация: дисциплина '{discipline}' не поддерживается для веб-проверки.",
+        }
+
+    participant_reports = []
+    for side in sides:
+        participant_reports.append(
+            collect_validated_sources(
+                side,
+                discipline_key,
+                "official team player roster ranking profile recent results current season",
+                min_sources=1,
+                timelimit="w",
+                context_terms=None,
+            )
+        )
+
+    if any(report.get("validated_count", 0) < 1 for report in participant_reports):
+        report_blocks = [format_validated_report(report) for report in participant_reports]
+        return {
+            "status": "insufficient_sources",
+            "match": None,
+            "report": "\n\n".join(report_blocks),
+            "validated_count": sum(report.get("validated_count", 0) for report in participant_reports),
+        }
+
+    normalized_date = date_text.strip() if date_text else "дата не указана"
+    report_lines = [
+        f"Валидация 1 контура: участники подтверждены для дисциплины {discipline_key}.",
+        "Дата матча используется из ввода пользователя.",
+        "",
+    ]
+    report_lines.extend(format_validated_report(report) for report in participant_reports)
+
+    match_payload = {
+        "sport": discipline_key,
+        "home": sides[0],
+        "away": sides[1],
+        "date": normalized_date,
+        "league": "user input",
+        "user_discipline": discipline,
+    }
+
+    return {
+        "status": "validated",
+        "match": match_payload,
+        "report": "\n\n".join(report_lines),
+        "validated_count": sum(report.get("validated_count", 0) for report in participant_reports),
     }
 
 
@@ -532,7 +830,7 @@ def format_validated_report(report: Dict[str, Any]) -> str:
     header = [
         f"Валидация: {report['status']}",
         f"Подтверждено источников: {report['validated_count']}",
-        f"Минимум источников: 2",
+        f"Минимум источников: {report.get('min_sources', 2)}",
         f"Окно свежести поиска: {report['freshness_window']}",
         f"Проверено: {report['checked_at']}",
     ]
@@ -552,7 +850,29 @@ def format_validated_report(report: Dict[str, Any]) -> str:
             )
         )
 
-    return "\n".join(header + [""] + blocks)
+    analysis = report.get("analysis_sources") or {}
+    analysis_answers = analysis.get("answers") or []
+    analysis_snippets = analysis.get("snippets") or []
+    analysis_engines = ", ".join(analysis.get("used_engines") or []) or "нет"
+
+    analysis_lines = [
+        "",
+        f"Аналитический поиск (Exa/Tavily): {analysis_engines}",
+    ]
+    for answer in analysis_answers:
+        analysis_lines.append(f"Ответ движка: {answer}")
+    for idx, snippet in enumerate(analysis_snippets, start=1):
+        analysis_lines.extend(
+            [
+                f"Аналитика {idx}: {snippet['search_engine']} ({snippet['site']})",
+                f"Query: {snippet['query']}",
+                f"Заголовок: {snippet['title']}",
+                f"Сниппет: {snippet['body']}",
+                f"Ссылка: {snippet['href']}",
+            ]
+        )
+
+    return "\n".join(header + [""] + blocks + analysis_lines)
 
 
 def _search(entity: str, discipline: str, stat_type: str, context_terms: Optional[str] = None) -> str:
@@ -561,7 +881,7 @@ def _search(entity: str, discipline: str, stat_type: str, context_terms: Optiona
         discipline,
         stat_type,
         min_sources=2,
-        timelimit="m",
+        timelimit="w",
         context_terms=context_terms,
     )
     return format_validated_report(report)

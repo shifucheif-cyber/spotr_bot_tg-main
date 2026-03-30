@@ -119,7 +119,7 @@ class DataFetcher:
             discipline,
             stat_type,
             min_sources=2,
-            timelimit="m",
+            timelimit="w",
             context_terms=context_terms,
         )
         sources = ", ".join(source["source"] for source in report["validated_sources"]) or "нет"

@@ -92,21 +92,30 @@ def format_stake_recommendation(probability: float, stake_percent: int | None) -
     )
 
 
-def get_bet_recommendation(llm_response: str) -> tuple[float | None, str]:
+def get_bet_recommendation(llm_response: str) -> dict:
     """
     Main function: extracts probability from LLM response and calculates recommendation.
+    Enforced structure: returns a dict with explicit fields, not a tuple.
     
     Args:
         llm_response: Text response from LLM
     
     Returns:
-        Tuple of (probability_float, recommendation_string)
-        Example: (75.0, "💰 **РЕКОМЕНДАЦИЯ:** 3% от вашего банка...")
+        Dict with fields:
+        - probability: float or None
+        - stake_percent: int or None (6, 3, 1)
+        - recommendation: str (formatted text)
+        - status: "success" or "invalid"
     """
     probability = extract_probability(llm_response)
     
     if probability is None:
-        return None, "❌ Не удалось извлечь вероятность из ответа модели"
+        return {
+            "probability": None,
+            "stake_percent": None,
+            "recommendation": "Вероятность не указана",
+            "status": "invalid",
+        }
     
     # Clamp probability to 0-100%
     probability = max(0, min(100, probability))
@@ -114,4 +123,9 @@ def get_bet_recommendation(llm_response: str) -> tuple[float | None, str]:
     stake_percent = calculate_stake_percentage(probability)
     recommendation = format_stake_recommendation(probability, stake_percent)
     
-    return probability, recommendation
+    return {
+        "probability": probability,
+        "stake_percent": stake_percent,
+        "recommendation": recommendation,
+        "status": "success",
+    }

@@ -42,9 +42,6 @@ def _get_match_data_sync(match, discipline, match_context=None):
         return get_tennis_data(match, match_context=match_context)
 
     # ММА/БОКС - выбор между ММА и Бокс
-    elif "ммА:" in d and "бокс" in d:
-        # Бокс
-        return get_mma_data(match, subdiscipline="boxing", match_context=match_context)
     elif "boxing" in d or "бокс" in d:
         return get_mma_data(match, subdiscipline="boxing", match_context=match_context)
     elif "mma" in d or "мма" in d:

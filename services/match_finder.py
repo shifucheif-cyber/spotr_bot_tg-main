@@ -315,12 +315,12 @@ def format_match_confirmation(clarification: Dict) -> str:
     if clarification["status"] == "ok":
         match = clarification["match"]
         return (
-            f"✅ **Матч подтвержден:**\n"
+            f"✅ **Участники и дисциплина подтверждены:**\n"
             f"🎮 **Дисциплина:** {match['sport']}\n"
             f"🏆 **{match['home']}** vs **{match['away']}**\n"
             f"📅 **Дата:** {match['date']}\n"
             f"🏅 **Лига:** {match['league']}\n\n"
-            f"Начинаю анализ..."
+            f"Начинаю анализ по данным пользователя и свежим источникам..."
         )
     
     elif clarification["status"] == "discipline_mismatch":

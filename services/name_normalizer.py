@@ -226,22 +226,10 @@ def _similarity(left: str, right: str) -> float:
 
 
 def _default_candidate_pool(discipline: Optional[str] = None) -> list[str]:
-    try:
-        from services.match_finder import UPCOMING_MATCHES, get_sport_keys_for_discipline
-    except Exception:
-        return []
-
-    sports = set(get_sport_keys_for_discipline(discipline)) if discipline else set(UPCOMING_MATCHES.keys())
-    if not sports:
-        sports = set(UPCOMING_MATCHES.keys())
-
     candidates: list[str] = []
-    for sport, matches in UPCOMING_MATCHES.items():
-        if sport not in sports:
-            continue
-        for match in matches:
-            candidates.extend([match.get("home", ""), match.get("away", "")])
     candidates.extend(COMMON_ALIASES.values())
+    for variants in CANONICAL_SEARCH_VARIANTS.values():
+        candidates.extend(variants)
     return [candidate for candidate in candidates if candidate]
 
 

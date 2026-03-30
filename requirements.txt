@@ -10,3 +10,4 @@ lxml
 cloudscraper
 duckduckgo-search
 ddgs
+tavily-python
