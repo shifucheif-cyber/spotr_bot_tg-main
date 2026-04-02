@@ -3,12 +3,13 @@ Universal data fetching module for match analysis.
 Handles verification from multiple sources and data extraction.
 """
 
+import hashlib
 import logging
 import re
 import requests
+import threading
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
-from urllib.parse import quote
+from datetime import datetime, timedelta, timezone
 
 from services.search_engine import (
     collect_validated_sources,
@@ -29,6 +30,41 @@ from services.search_engine import (
 
 logger = logging.getLogger(__name__)
 
+# ── Match analysis cache ──
+# Key: hash(discipline, sorted participants) → {"result": str, "ts": datetime}
+_match_cache: Dict[str, Dict[str, Any]] = {}
+_CACHE_TTL = timedelta(days=2)  # кэш: события старше 2 дней удаляются
+_CACHE_MAX = 200
+_cache_lock = threading.Lock()
+
+
+def _cache_key(discipline: str, side1: str, side2: str, match_date: str = "") -> str:
+    """Детерминированный ключ: дисциплина + отсортированные участники + дата."""
+    parts = sorted([side1.strip().lower(), side2.strip().lower()])
+    raw = f"{discipline.strip().lower()}|{parts[0]}|{parts[1]}|{match_date.strip().lower()}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _get_cached(key: str) -> Optional[str]:
+    with _cache_lock:
+        entry = _match_cache.get(key)
+        if not entry:
+            return None
+        if datetime.now(tz=timezone.utc) - entry["ts"] > _CACHE_TTL:
+            del _match_cache[key]
+            return None
+        logger.info("Cache hit for match analysis (key=%s)", key[:8])
+        return entry["result"]
+
+
+def _put_cache(key: str, result: str) -> None:
+    with _cache_lock:
+        if len(_match_cache) >= _CACHE_MAX:
+            # удаляем самый старый
+            oldest = min(_match_cache, key=lambda k: _match_cache[k]["ts"])
+            del _match_cache[oldest]
+        _match_cache[key] = {"result": result, "ts": datetime.now(tz=timezone.utc)}
+
 # User agents for requests
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -43,69 +79,6 @@ class DataFetcher:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
-
-    def fetch_url(self, url: str) -> Optional[str]:
-        """
-        Safely fetch URL content.
-        
-        Args:
-            url: URL to fetch
-            
-        Returns:
-            Response text or None on failure
-        """
-        try:
-            response = self.session.get(url, timeout=TIMEOUT)
-            response.raise_for_status()
-            return response.text
-        except requests.RequestException as e:
-            logger.warning(f"Failed to fetch {url}: {e}")
-            return None
-
-    def search_google(self, query: str, language: str = "en") -> List[str]:
-        """
-        Generate search URLs (not actual Google search, but URL patterns).
-        This is a placeholder for actual search implementation.
-        
-        Args:
-            query: Search query
-            language: Language code (en, ru)
-            
-        Returns:
-            List of potential URLs to search
-        """
-        urls = []
-        # This would be replaced with actual search API or web scraping
-        # For now, returning placeholder URLs based on query
-        if "CS2" in query or "counter-strike" in query.lower():
-            urls.extend([
-                f"https://www.hltv.org/results?event={quote(query)}",
-                f"https://liquipedia.net/counterstrike/search?query={quote(query)}"
-            ])
-        return urls
-
-    def verify_data(self, data_sources: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Verify data from multiple sources and return consolidated result.
-        
-        Args:
-            data_sources: List of data from different sources
-            
-        Returns:
-            Verified consolidated data
-        """
-        if not data_sources:
-            return {}
-
-        # Simple aggregation - can be enhanced with more sophisticated logic
-        consolidated = {}
-        for source in data_sources:
-            for key, value in source.items():
-                if key not in consolidated:
-                    consolidated[key] = value
-                # Could add conflict resolution logic here
-
-        return consolidated
 
     def build_validated_payload(
         self,
@@ -410,6 +383,15 @@ def fetch_match_analysis_data(
         return f"Матч: {match_name}\n\nНе удалось определить участников матча."
 
     side1, side2 = teams[0].strip(), teams[1].strip()
+
+    # ── Проверяем кэш (одинаковые участники + дисциплина + дата) ──
+    discipline = getattr(fetcher, '_discipline', None) or getattr(fetcher, 'game_key', None) or fetcher.__class__.__name__.replace('Fetcher', '').lower()
+    match_date = (match_context or {}).get("date", "")
+    cache_k = _cache_key(discipline, side1, side2, match_date)
+    cached = _get_cached(cache_k)
+    if cached is not None:
+        return cached
+
     ctx1 = _build_context(match_context, side2)
     ctx2 = _build_context(match_context, side1)
 
@@ -435,27 +417,18 @@ def fetch_match_analysis_data(
     if len(parts) == 1:
         parts.append("\nДанные из поисковых источников не найдены. Анализируйте на основе общих знаний.")
 
-    return "\n".join(parts)
+    result = "\n".join(parts)
+    _put_cache(cache_k, result)
+    return result
 
-def get_fetcher(discipline: str) -> Optional[DataFetcher]:
-    """Get appropriate fetcher for discipline."""
-    d = discipline.lower()
-    
-    if "cs" in d or "counter-strike" in d or "cs2" in d:
-        return CS2Fetcher()
-    elif "футбол" in d or "football" in d or "soccer" in d:
-        return FootballFetcher()
-    elif "table" in d or "настольный" in d or "table_tennis" in d:
-        return TableTennisFetcher()
-    elif "теннис" in d or "tennis" in d:
-        return TennisFetcher()
-    elif "мма" in d or "бокс" in d or "boxing" in d or "fighting" in d:
-        return MMAFetcher()
-    elif "баскетбол" in d or "basketball" in d:
-        return BasketballFetcher()
-    elif "хоккей" in d or "hockey" in d:
-        return HockeyFetcher()
-    elif "волейбол" in d or "volleyball" in d:
-        return VolleyballFetcher()
-    
-    return None
+
+def cleanup_expired_cache() -> int:
+    """Удаляет устаревшие записи кэша. Возвращает количество удалённых."""
+    with _cache_lock:
+        now = datetime.now(tz=timezone.utc)
+        expired = [k for k, v in _match_cache.items() if now - v["ts"] > _CACHE_TTL]
+        for k in expired:
+            del _match_cache[k]
+        if expired:
+            logger.info("Cache cleanup: removed %d expired entries, %d remaining", len(expired), len(_match_cache))
+        return len(expired)

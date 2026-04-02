@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
+import cloudscraper
 import requests
 from bs4 import BeautifulSoup
 from services.name_normalizer import expand_context_terms, get_search_variants, normalize_entity_name, split_match_text, transliterate_text
@@ -19,8 +20,18 @@ try:
     from ddgs import DDGS
 except ImportError:
     from duckduckgo_search import DDGS
+try:
+    from googlesearch import search as google_search_lib
+except ImportError:
+    google_search_lib = None
 
 logger = logging.getLogger(__name__)
+
+# ── Shared cloudscraper session (bypasses JS challenges / Cloudflare) ──
+_scraper = cloudscraper.create_scraper(
+    browser={"browser": "chrome", "platform": "windows"},
+    delay=3,
+)
 
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -31,8 +42,7 @@ ENABLE_GOOGLE_SEARCH = os.getenv("ENABLE_GOOGLE_SEARCH", "false").strip().lower(
 SEARCH_MAX_SITES = max(1, int(os.getenv("SEARCH_MAX_SITES", "4")))
 SEARCH_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_RESULTS_PER_QUERY", "1")))
 SEARCH_ENABLE_BROAD_WINDOW = os.getenv("SEARCH_ENABLE_BROAD_WINDOW", "false").strip().lower() in {"1", "true", "yes", "on"}
-SEARCH_DDGS_BACKEND = os.getenv("SEARCH_DDGS_BACKEND", "duckduckgo")
-SEARCH_REGION = os.getenv("SEARCH_REGION", "ru-ru")
+SEARCH_REGION = os.getenv("SEARCH_REGION", "wt-wt")
 EXA_API_KEY = os.getenv("EXA_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 SEARCH_ANALYSIS_PROVIDER = os.getenv("SEARCH_ANALYSIS_PROVIDER", "hybrid").strip().lower()
@@ -379,7 +389,7 @@ def _set_google_backoff() -> None:
 
 def _fetch_page_excerpt(url: str, entity: str) -> str:
     try:
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=7)
+        response = _scraper.get(url, timeout=7)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "lxml")
         for tag in soup(["script", "style", "noscript"]):
@@ -413,110 +423,121 @@ def _is_result_valid(entity: str, title: str, body: str, excerpt: str, url: str 
 
     matched = sum(1 for token in entity_tokens if token in haystack)
     if len(entity_tokens) == 1:
-        return matched == 1
+        return matched >= 1
     return matched >= min(2, len(entity_tokens))
 
 
-_STAT_SUFFICIENCY_THRESHOLD = 0.5  # доля ключевых слов stat_type, найденных в тексте
-
-
-def _is_source_sufficient(source: Dict[str, Any], stat_type: str) -> bool:
-    """Check if a single validated source already covers enough stat_type keywords.
-
-    If the excerpt + body + title contain >= 50% of the requested stat_type tokens,
-    the source is considered sufficient and the second query can be skipped.
-    """
-    stat_tokens = [t for t in stat_type.lower().split() if len(t) > 2]
-    if not stat_tokens:
-        return False
-
-    haystack = f"{source.get('title', '')} {source.get('body', '')} {source.get('excerpt', '')}".lower()
-    matched = sum(1 for token in stat_tokens if token in haystack)
-    return matched >= max(1, len(stat_tokens) * _STAT_SUFFICIENCY_THRESHOLD)
-
-
 def search_with_ddgs(query: str, num_results: int = 5, timelimit: str = "m") -> List[Dict[str, Any]]:
+    """Search via DuckDuckGo using ddgs library (v9+)."""
     try:
-        with DDGS(timeout=REQUEST_TIMEOUT) as ddgs:
-            kwargs = {
-                "max_results": num_results,
-                "backend": SEARCH_DDGS_BACKEND,
-                "region": SEARCH_REGION,
-            }
-            if timelimit:
-                kwargs["timelimit"] = timelimit
-            results = list(ddgs.text(query, **kwargs))
-        logger.info("Found %s results for query: %s", len(results), query)
-        return results
+        ddgs = DDGS()
+        kwargs: Dict[str, Any] = {"max_results": num_results}
+        if timelimit:
+            kwargs["timelimit"] = timelimit
+        results = ddgs.text(query, **kwargs)
+        if results:
+            logger.info("DDG: %d results for: %s", len(results), query)
+            return results
+        logger.info("DDG: 0 results for: %s", query)
     except Exception as exc:
-        if "No results found" in str(exc):
-            logger.info("No DDG results for query: %s", query)
-        else:
-            logger.error("DDG search failed for query '%s': %s", query, exc)
-        return []
+        logger.debug("DDG failed for '%s': %s", query, exc)
+    return []
 
 
 def search_with_google(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+    """Google search: tries googlesearch-python lib first, then cloudscraper scraping."""
     if not _google_is_available():
         logger.debug("Google search skipped for query '%s'", query)
         return []
 
+    # ── Method 1: googlesearch-python library (cleanest approach) ──
+    if google_search_lib is not None:
+        try:
+            urls = list(google_search_lib(query, num_results=num_results, lang="en", sleep_interval=2))
+            if urls:
+                results: List[Dict[str, Any]] = []
+                for url in urls:
+                    if "google.com" in url:
+                        continue
+                    results.append({
+                        "title": url.split("/")[-1].replace("-", " ").replace("_", " ")[:120],
+                        "body": "",
+                        "href": url,
+                        "search_engine": "google",
+                    })
+                if results:
+                    logger.info("Google (lib): %d results for: %s", len(results), query)
+                    return results
+        except Exception as exc:
+            logger.debug("Google (lib) failed for '%s': %s", query, exc)
+
+    # ── Method 2: cloudscraper scraping (fallback) ──
     try:
-        response = requests.get(
+        response = _scraper.get(
             GOOGLE_SEARCH_URL,
             params={"q": query, "hl": "en", "num": num_results},
-            headers=REQUEST_HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "lxml")
-        results: List[Dict[str, Any]] = []
+        results = []
 
+        # Try /url?q= links first
         for link in soup.select("a[href^='/url?q=']"):
             href = link.get("href", "")
             parsed = parse_qs(urlparse(href).query)
             url = parsed.get("q", [""])[0]
             if not url or "google.com" in url:
                 continue
-
             title_node = link.find("h3")
             title = title_node.get_text(" ", strip=True) if title_node else link.get_text(" ", strip=True)
             parent_text = link.parent.get_text(" ", strip=True) if link.parent else ""
-            results.append({
-                "title": title,
-                "body": parent_text[:320],
-                "href": url,
-                "search_engine": "google",
-            })
+            results.append({"title": title, "body": parent_text[:320], "href": url, "search_engine": "google"})
             if len(results) >= num_results:
                 break
 
-        logger.info("Found %s Google results for query: %s", len(results), query)
+        # Fallback: div.g containers
+        if not results:
+            for div in soup.select("div.g"):
+                a_tag = div.find("a", href=True)
+                if not a_tag:
+                    continue
+                url = a_tag["href"]
+                if not url.startswith("http") or "google.com" in url:
+                    continue
+                title = a_tag.get_text(" ", strip=True)
+                snippet_tag = div.find("span") or div.find("div", class_="VwiC3b")
+                body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
+                results.append({"title": title, "body": body[:320], "href": url, "search_engine": "google"})
+                if len(results) >= num_results:
+                    break
+
+        logger.info("Google (scrape): %d results for: %s", len(results), query)
         return results
     except requests.HTTPError as exc:
         if exc.response is not None and exc.response.status_code == 429:
             logger.warning("Google search throttled, backing off for %s seconds", GOOGLE_BACKOFF_SECONDS)
             _set_google_backoff()
-        logger.error("Google search failed for query '%s': %s", query, exc)
+        logger.debug("Google search failed for '%s': %s", query, exc)
         return []
     except Exception as exc:
-        logger.error("Google search failed for query '%s': %s", query, exc)
+        logger.debug("Google search failed for '%s': %s", query, exc)
         return []
 
 
 def search_with_bing(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """Scrape Bing search results directly (no API key needed)."""
+    """Scrape Bing search results via cloudscraper (bypasses JS challenge)."""
     try:
-        response = requests.get(
+        response = _scraper.get(
             "https://www.bing.com/search",
             params={"q": query, "count": num_results},
-            headers=REQUEST_HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "lxml")
         results: List[Dict[str, Any]] = []
-        for li in soup.select("li.b_algo"):
+        containers = soup.select("li.b_algo") or soup.select("ol#b_results > li")
+        for li in containers:
             a_tag = li.find("a", href=True)
             if not a_tag:
                 continue
@@ -524,12 +545,12 @@ def search_with_bing(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
             if "bing.com" in url or "microsoft.com" in url:
                 continue
             title = a_tag.get_text(" ", strip=True)
-            snippet_tag = li.find("p") or li.find("div", class_="b_caption")
+            snippet_tag = li.find("p") or li.find("div", class_="b_caption") or li.find("span")
             body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
             results.append({"title": title, "body": body[:320], "href": url, "search_engine": "bing"})
             if len(results) >= num_results:
                 break
-        logger.info("Found %s Bing results for query: %s", len(results), query)
+        logger.info("Bing: %d results for: %s", len(results), query)
         return results
     except Exception as exc:
         logger.debug("Bing search failed for '%s': %s", query, exc)
@@ -537,18 +558,17 @@ def search_with_bing(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
 
 
 def search_with_yahoo(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """Scrape Yahoo search results (no API key needed)."""
+    """Scrape Yahoo search results via cloudscraper."""
     try:
-        response = requests.get(
+        response = _scraper.get(
             "https://search.yahoo.com/search",
             params={"p": query, "n": num_results},
-            headers=REQUEST_HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "lxml")
         results: List[Dict[str, Any]] = []
-        for div in soup.select("div.algo-sr") + soup.select("div.dd.algo"):
+        for div in soup.select("div.algo-sr") + soup.select("div.dd.algo") + soup.select("div.Sr"):
             a_tag = div.find("a", href=True)
             if not a_tag:
                 continue
@@ -572,12 +592,11 @@ def search_with_yahoo(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
 
 
 def search_with_yandex(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """Scrape Yandex search results (no API key needed)."""
+    """Scrape Yandex search results via cloudscraper."""
     try:
-        response = requests.get(
+        response = _scraper.get(
             "https://yandex.com/search/",
             params={"text": query, "numdoc": num_results, "lang": "en"},
-            headers={**REQUEST_HEADERS, "Accept-Language": "en-US,en;q=0.9,ru;q=0.8"},
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
@@ -604,36 +623,33 @@ def search_with_yandex(query: str, num_results: int = 5) -> List[Dict[str, Any]]
 
 
 # ── Multi-engine search: query ALL engines, merge results ──
+# DDG is primary, others are reserve fallbacks.
+# Google requires ENABLE_GOOGLE_SEARCH=true in env.
+# Bing/Yahoo/Yandex scrapers may need selector updates over time.
 SEARCH_ENGINE_ORDER = [
     ("ddg", search_with_ddgs),
     ("bing", search_with_bing),
-    ("google", search_with_google),
     ("yahoo", search_with_yahoo),
     ("yandex", search_with_yandex),
+    ("google", search_with_google),
 ]
 
 
 def multi_engine_search(query: str, num_results: int = 8, timelimit: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Query available search engines in order, stop early if we have enough results."""
+    """Query ALL available search engines and merge deduplicated results."""
     all_results: List[Dict[str, Any]] = []
     seen_urls: set = set()
-    target = num_results  # stop when we have this many unique results
 
     for engine_name, search_fn in SEARCH_ENGINE_ORDER:
-        if len(all_results) >= target:
-            logger.info("Reached %d results, skipping remaining engines", target)
-            break
-
         try:
-            remaining = target - len(all_results)
             if engine_name == "ddg":
-                raw = search_fn(query, num_results=max(remaining, 5), timelimit=timelimit)
+                raw = search_fn(query, num_results=num_results, timelimit=timelimit)
             elif engine_name == "google":
                 if not _google_is_available():
                     continue
-                raw = search_fn(query, num_results=remaining)
+                raw = search_fn(query, num_results=num_results)
             else:
-                raw = search_fn(query, num_results=remaining)
+                raw = search_fn(query, num_results=num_results)
         except Exception as exc:
             logger.debug("Engine %s failed: %s", engine_name, exc)
             continue
@@ -899,9 +915,15 @@ def collect_validated_sources(
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             })
 
-    # ── Phase 1: broad search across ALL free engines ──
+    # ── Бюджет запросов на участника: max 2 бесплатных + max 2 AI = max 4 ──
+    MAX_FREE_QUERIES = 2
+    MAX_AI_QUERIES = 2
+
+    # ── Phase 1: broad search across ALL free engines (free query 1/2) ──
+    free_queries_used = 0
     broad_query = f"{entity} {discipline_label} {stat_type}{context_suffix}"
-    logger.info("Phase 1 — broad search: %s", broad_query)
+    free_queries_used += 1
+    logger.info("Phase 1 — free query %d/%d (broad): %s", free_queries_used, MAX_FREE_QUERIES, broad_query)
     broad_results = multi_engine_search(broad_query, num_results=10, timelimit=timelimit)
 
     # Sort broad results: trusted domains first
@@ -911,50 +933,63 @@ def collect_validated_sources(
     _validate_and_collect(broad_results)
     logger.info("After Phase 1: %d validated for '%s'", len(validated_sources), entity)
 
-    # ── Phase 2: targeted site: queries — only if Phase 1 insufficient ──
-    if len(validated_sources) < min_sources:
+    # ── Phase 2: targeted site: query (free query 2/2) — only if Phase 1 insufficient ──
+    if len(validated_sources) < min_sources and free_queries_used < MAX_FREE_QUERIES:
         sites_to_query = _get_sites_for_query(discipline, entity, context_terms)
-        for site in sites_to_query[:3]:
+        for site in sites_to_query[:1]:
             if len(validated_sources) >= min_sources:
                 break
+            if free_queries_used >= MAX_FREE_QUERIES:
+                break
+            free_queries_used += 1
             site_query = f"{entity} {stat_type}{context_suffix} site:{site}"
-            logger.info("Phase 2 — site search: %s", site_query)
-            # Bing has best site: operator support and is fast
+            logger.info("Phase 2 — free query %d/%d (site): %s", free_queries_used, MAX_FREE_QUERIES, site_query)
             try:
-                raw = search_with_bing(site_query, num_results=3)
+                raw = search_with_ddgs(site_query, num_results=3, timelimit=timelimit)
             except Exception:
                 raw = []
-            if not raw:
-                try:
-                    raw = search_with_ddgs(site_query, num_results=3, timelimit=timelimit)
-                except Exception:
-                    raw = []
             for r in raw:
                 r.setdefault("search_engine", "site_search")
             _validate_and_collect(raw)
         logger.info("After Phase 2: %d validated for '%s'", len(validated_sources), entity)
 
-    logger.info("Free engines total: %d validated sources for '%s'", len(validated_sources), entity)
+    logger.info("Free engines done: %d/%d queries used, %d validated sources for '%s'",
+                free_queries_used, MAX_FREE_QUERIES, len(validated_sources), entity)
 
-    # ── Phase 3: AI search (Exa/Tavily) — only when free engines lack data ──
+    # ── Phase 3: AI search (Exa/Tavily) — fallback, max 2 queries ──
     analysis_sources: Dict[str, Any] = {"answers": [], "snippets": [], "used_engines": []}
     if len(validated_sources) < min_sources:
-        logger.info("Free engines insufficient (%d/%d) — calling AI search (max 2 queries)",
-                     len(validated_sources), min_sources)
-        analysis_sources = _collect_analysis_sources(
-            entity, discipline, stat_type, context_terms,
-            [e["site"] for e in all_sites],
-            max_queries=2,
-        )
+        if EXA_API_KEY or TAVILY_API_KEY:
+            logger.info("Phase 3 — free insufficient (%d/%d), calling AI search (max %d) for '%s'",
+                         len(validated_sources), min_sources, MAX_AI_QUERIES, entity)
+            analysis_sources = _collect_analysis_sources(
+                entity, discipline, stat_type, context_terms,
+                [e["site"] for e in all_sites],
+                max_queries=MAX_AI_QUERIES,
+            )
+        else:
+            logger.info("Phase 3 — free insufficient but no AI keys configured")
     else:
-        logger.info("Free engines sufficient (%d/%d) — skipping AI search",
-                     len(validated_sources), min_sources)
+        logger.info("Phase 3 — free sufficient (%d/%d), skipping AI search for '%s'",
+                     len(validated_sources), min_sources, entity)
 
-    # ── Fallback: if still nothing validated, take raw results as-is ──
+    # ── Fallback: if still nothing validated, take best-matching raw results ──
     if not validated_sources and unvalidated_results:
-        logger.info("Fallback: taking %d unvalidated results for '%s'",
+        logger.info("Fallback: scoring %d unvalidated results for '%s'",
                      len(unvalidated_results), entity)
-        for result in unvalidated_results[:min_sources]:
+        entity_tokens = _normalize_tokens(entity)
+        scored: List[tuple] = []
+        for result in unvalidated_results:
+            url = result.get("href", "")
+            title = result.get("title", "")
+            body = result.get("body", "")
+            url_text = urlparse(url).path.replace("-", " ").replace("_", " ") if url else ""
+            haystack = f"{title} {body} {url_text}".lower()
+            match_count = sum(1 for t in entity_tokens if t in haystack)
+            if match_count > 0:  # at least 1 token matches — not completely random
+                scored.append((match_count, result))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for _, result in scored[:min_sources]:
             url = result.get("href", "")
             title = result.get("title", "")
             body = result.get("body", "")

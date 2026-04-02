@@ -8,6 +8,7 @@ requests
 beautifulsoup4
 lxml
 cloudscraper
-duckduckgo-search
 ddgs
+googlesearch-python
 tavily-python
+exa-py

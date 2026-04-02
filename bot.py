@@ -2,7 +2,7 @@
 import re
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.context import FSMContext
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
-LLM_FALLBACK_ORDER = ["groq", "deepseek", "google"]
+LLM_FALLBACK_ORDER = ["google", "groq", "deepseek"]
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-1.5")
@@ -48,7 +48,7 @@ GOOGLE_API_VERSION = os.getenv("GOOGLE_API_VERSION", "v1")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "compound-beta-mini")
-GROQ_BASE_URL = os.getenv("GROQ_BASE_URL")
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com")
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -322,11 +322,18 @@ async def generate_content_with_metadata(contents: str, discipline: str = "ки�
         handler = provider_handlers[provider_name]
         try:
             logger.info("Trying LLM provider: %s", provider_name)
-            response = await handler(contents, discipline, discipline_key)
+            response = await asyncio.wait_for(
+                handler(contents, discipline, discipline_key),
+                timeout=60.0,
+            )
             if response and response.strip():
                 logger.info("LLM provider succeeded: %s", provider_name)
                 return {"provider": provider_name, "text": response}
             raise ValueError(f"{provider_name} returned empty response")
+        except asyncio.TimeoutError:
+            last_error = TimeoutError(f"{provider_name} timed out after 60s")
+            logger.warning("LLM provider %s timed out", provider_name)
+            continue
         except Exception as exc:
             last_error = exc
             logger.warning("LLM provider %s failed: %s", provider_name, exc)
@@ -646,7 +653,6 @@ class OrderAnalysis(StatesGroup):
     waiting_team1 = State()          # Первая команда/игрок
     waiting_team2 = State()          # Вторая команда/игрок
     waiting_date = State()
-    confirming_match = State()
 
 
 # --- ДИСЦИПЛИНЫ С СУБКАТЕГОРИЯМИ ---
@@ -761,8 +767,9 @@ async def set_subdiscipline(message: types.Message, state: FSMContext):
         await message.answer("Пожалуйста, выберите из предложенных вариантов")
 
 def get_date_keyboard() -> types.InlineKeyboardMarkup:
-    """Создает клавиатуру с датами на 7 дней от сегодня"""
-    today = datetime.now()
+    """Создает клавиатуру с датами на 7 дней от сегодня (MSK, UTC+3)"""
+    msk = timezone(timedelta(hours=3))
+    today = datetime.now(tz=msk)
     
     kb = []
     for i in range(7):
@@ -829,14 +836,6 @@ def _extract_contract_field(text: str, patterns: list[str]) -> str:
     return ""
 
 
-def _clean_stake_text(text: str) -> str:
-    """
-    DEPRECATED: Used in old response contract.
-    Keeping for backward compatibility only.
-    """
-    return text or "ПРОПУСК"
-
-
 def format_response_contract(match_text: str, raw_analysis: str, prediction_struct: dict) -> str:
     """
     Format final response as enforced contract with required fields.
@@ -884,6 +883,19 @@ def split_long_message(text: str, max_length: int = 4000) -> list[str]:
     paragraphs = text.split("\n\n")
     
     for para in paragraphs:
+        # Если один абзац длиннее лимита — режем по строкам
+        if len(para) > max_length:
+            if current:
+                messages.append(current)
+                current = ""
+            lines = para.split("\n")
+            for line in lines:
+                if len(current) + len(line) + 1 > max_length:
+                    if current:
+                        messages.append(current)
+                    current = ""
+                current += line + "\n"
+            continue
         if len(current) + len(para) + 2 > max_length:
             if current:
                 messages.append(current)
@@ -1210,32 +1222,13 @@ async def check_match_text(message: types.Message, state: FSMContext):
         await state.set_state(OrderAnalysis.waiting_team1)
 
 
-@dp.message(OrderAnalysis.confirming_match)
-async def confirm_match(message: types.Message, state: FSMContext):
-    """Обработчик подтверждения матча"""
-    user_response = message.text.strip().lower()
-    data = await state.get_data()
-    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID)
-    log_user_event(message.from_user.id, "confirm_match", {"response": user_response})
-    
-    if user_response in ["да", "yes", "y", "д", "ок", "ok"]:
-        # Пользователь согласен, начинаем анализ
-        await start_analysis(message, state)
-    elif user_response in ["нет", "no", "n", "н"]:
-        # Пользователь отказался
-        await message.answer("❌ Анализ отменён. Попробуйте снова командой /start")
-        await state.clear()
-    else:
-        await message.answer("Пожалуйста, ответьте 'Да' или 'Нет'")
-
-
 async def start_analysis(message: types.Message, state: FSMContext):
     """Запускает анализ матча"""
     data = await state.get_data()
     
     status = await message.answer("🔎 Анализирую матч...")
     
-    try:
+    try:  # noqa: the finally block ensures status message cleanup
         # Используем full_discipline если есть (с субдисциплиной)
         discipline = data.get('full_discipline') or data.get('discipline', 'киберспорт')
         discipline_key = data.get('discipline_key')
@@ -1280,7 +1273,7 @@ async def start_analysis(message: types.Message, state: FSMContext):
                     discipline,
                     match_context=match_context,
                 ),
-                timeout=45,
+                timeout=120,
             )
         except asyncio.TimeoutError:
             logger.warning("Timed out collecting search data for %s", analysis_match)
@@ -1313,8 +1306,6 @@ async def start_analysis(message: types.Message, state: FSMContext):
             discipline_key=discipline_key,
         )
         response_text = content_metadata["text"]
-
-        await status.delete()
 
         if response_text:
             record_analysis_result(
@@ -1389,13 +1380,29 @@ async def start_analysis(message: types.Message, state: FSMContext):
         elif "quota" in str(e).lower() or "rate limit" in str(e).lower():
             await message.answer("⚙️ Сервисы ИИ перегружены (лимит запросов). Пожалуйста, попробуйте через пару минут.")
         else:
-            await message.answer("❌ Внутренняя ошибка платформы: " + str(e))
+            logging.error("Unhandled analysis error: %s", e, exc_info=True)
+            await message.answer("❌ Произошла ошибка при анализе. Попробуйте позже или выберите другой матч.")
+    finally:
+        try:
+            await status.delete()
+        except Exception:
+            pass
 
     await state.clear()
 
 # --- RUN ---
+async def _periodic_cache_cleanup():
+    """Фоновая задача: раз в сутки удаляет записи кэша старше 2 дней."""
+    from services.data_fetcher import cleanup_expired_cache
+    while True:
+        await asyncio.sleep(24 * 3600)  # раз в сутки
+        removed = cleanup_expired_cache()
+        logger.info("Daily cache cleanup: removed %d stale entries", removed)
+
+
 async def main():
     init_user_store()
+    asyncio.create_task(_periodic_cache_cleanup())
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
   
