@@ -27,7 +27,7 @@ REQUEST_HEADERS = {
 }
 REQUEST_TIMEOUT = 10
 GOOGLE_SEARCH_URL = "https://www.google.com/search"
-ENABLE_GOOGLE_SEARCH = os.getenv("ENABLE_GOOGLE_SEARCH", "true").strip().lower() in {"1", "true", "yes", "on"}
+ENABLE_GOOGLE_SEARCH = os.getenv("ENABLE_GOOGLE_SEARCH", "false").strip().lower() in {"1", "true", "yes", "on"}
 SEARCH_MAX_SITES = max(1, int(os.getenv("SEARCH_MAX_SITES", "4")))
 SEARCH_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_RESULTS_PER_QUERY", "1")))
 SEARCH_ENABLE_BROAD_WINDOW = os.getenv("SEARCH_ENABLE_BROAD_WINDOW", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -113,6 +113,8 @@ DISCIPLINE_SOURCE_CONFIG = {
         {"site": "whoscored.com", "label": "WhoScored", "focus": "player ratings weak defense style of play"},
         {"site": "transfermarkt.com", "label": "Transfermarkt", "focus": "injuries suspensions market value transfers"},
         {"site": "flashscore.com", "label": "Flashscore", "focus": "lineups live stats"},
+        {"site": "sofascore.com", "label": "SofaScore", "focus": "live score h2h lineups player ratings"},
+        {"site": "fotmob.com", "label": "FotMob", "focus": "live score predicted lineups h2h stats"},
         {"site": "fbref.com", "label": "FBref", "focus": "xg sca pressing advanced stats"},
     ],
     "tennis": [
@@ -377,7 +379,7 @@ def _set_google_backoff() -> None:
 
 def _fetch_page_excerpt(url: str, entity: str) -> str:
     try:
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=7)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "lxml")
         for tag in soup(["script", "style", "noscript"]):
@@ -401,8 +403,10 @@ def _fetch_page_excerpt(url: str, entity: str) -> str:
         return ""
 
 
-def _is_result_valid(entity: str, title: str, body: str, excerpt: str) -> bool:
-    haystack = f"{title} {body} {excerpt}".lower()
+def _is_result_valid(entity: str, title: str, body: str, excerpt: str, url: str = "") -> bool:
+    # Include URL path in haystack — URLs like /las-palmas-vs-granada/ contain entity
+    url_text = urlparse(url).path.replace("-", " ").replace("_", " ") if url else ""
+    haystack = f"{title} {body} {excerpt} {url_text}".lower()
     entity_tokens = _normalize_tokens(entity)
     if not entity_tokens:
         return False
@@ -411,6 +415,24 @@ def _is_result_valid(entity: str, title: str, body: str, excerpt: str) -> bool:
     if len(entity_tokens) == 1:
         return matched == 1
     return matched >= min(2, len(entity_tokens))
+
+
+_STAT_SUFFICIENCY_THRESHOLD = 0.5  # доля ключевых слов stat_type, найденных в тексте
+
+
+def _is_source_sufficient(source: Dict[str, Any], stat_type: str) -> bool:
+    """Check if a single validated source already covers enough stat_type keywords.
+
+    If the excerpt + body + title contain >= 50% of the requested stat_type tokens,
+    the source is considered sufficient and the second query can be skipped.
+    """
+    stat_tokens = [t for t in stat_type.lower().split() if len(t) > 2]
+    if not stat_tokens:
+        return False
+
+    haystack = f"{source.get('title', '')} {source.get('body', '')} {source.get('excerpt', '')}".lower()
+    matched = sum(1 for token in stat_tokens if token in haystack)
+    return matched >= max(1, len(stat_tokens) * _STAT_SUFFICIENCY_THRESHOLD)
 
 
 def search_with_ddgs(query: str, num_results: int = 5, timelimit: str = "m") -> List[Dict[str, Any]]:
@@ -482,24 +504,153 @@ def search_with_google(query: str, num_results: int = 5) -> List[Dict[str, Any]]
         return []
 
 
-def _merge_search_results(query: str, timelimit: Optional[str]) -> List[Dict[str, Any]]:
-    google_results = search_with_google(query, num_results=SEARCH_RESULTS_PER_QUERY)
-    for result in google_results:
-        result.setdefault("search_engine", "google")
+def search_with_bing(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+    """Scrape Bing search results directly (no API key needed)."""
+    try:
+        response = requests.get(
+            "https://www.bing.com/search",
+            params={"q": query, "count": num_results},
+            headers=REQUEST_HEADERS,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "lxml")
+        results: List[Dict[str, Any]] = []
+        for li in soup.select("li.b_algo"):
+            a_tag = li.find("a", href=True)
+            if not a_tag:
+                continue
+            url = a_tag["href"]
+            if "bing.com" in url or "microsoft.com" in url:
+                continue
+            title = a_tag.get_text(" ", strip=True)
+            snippet_tag = li.find("p") or li.find("div", class_="b_caption")
+            body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
+            results.append({"title": title, "body": body[:320], "href": url, "search_engine": "bing"})
+            if len(results) >= num_results:
+                break
+        logger.info("Found %s Bing results for query: %s", len(results), query)
+        return results
+    except Exception as exc:
+        logger.debug("Bing search failed for '%s': %s", query, exc)
+        return []
 
-    ddg_results = search_with_ddgs(query, num_results=SEARCH_RESULTS_PER_QUERY, timelimit=timelimit)
-    for result in ddg_results:
-        result.setdefault("search_engine", "duckduckgo")
 
-    merged: List[Dict[str, Any]] = []
-    seen_urls = set()
-    for result in google_results + ddg_results:
-        url = result.get("href", "")
-        if not url or url in seen_urls:
+def search_with_yahoo(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+    """Scrape Yahoo search results (no API key needed)."""
+    try:
+        response = requests.get(
+            "https://search.yahoo.com/search",
+            params={"p": query, "n": num_results},
+            headers=REQUEST_HEADERS,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "lxml")
+        results: List[Dict[str, Any]] = []
+        for div in soup.select("div.algo-sr") + soup.select("div.dd.algo"):
+            a_tag = div.find("a", href=True)
+            if not a_tag:
+                continue
+            raw_url = a_tag["href"]
+            # Yahoo wraps URLs in redirect
+            parsed_qs = parse_qs(urlparse(raw_url).query)
+            url = parsed_qs.get("RU", [raw_url])[0]
+            if "yahoo.com" in url:
+                continue
+            title = a_tag.get_text(" ", strip=True)
+            snippet_tag = div.find("p") or div.find("span", class_="fc-falcon")
+            body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
+            results.append({"title": title, "body": body[:320], "href": url, "search_engine": "yahoo"})
+            if len(results) >= num_results:
+                break
+        logger.info("Found %s Yahoo results for query: %s", len(results), query)
+        return results
+    except Exception as exc:
+        logger.debug("Yahoo search failed for '%s': %s", query, exc)
+        return []
+
+
+def search_with_yandex(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+    """Scrape Yandex search results (no API key needed)."""
+    try:
+        response = requests.get(
+            "https://yandex.com/search/",
+            params={"text": query, "numdoc": num_results, "lang": "en"},
+            headers={**REQUEST_HEADERS, "Accept-Language": "en-US,en;q=0.9,ru;q=0.8"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "lxml")
+        results: List[Dict[str, Any]] = []
+        for item in soup.select("li.serp-item"):
+            a_tag = item.find("a", href=True)
+            if not a_tag:
+                continue
+            url = a_tag["href"]
+            if "yandex." in url:
+                continue
+            title = a_tag.get_text(" ", strip=True)
+            snippet_tag = item.find("span", class_="OrganicTextContentSpan") or item.find("div", class_="text-container")
+            body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
+            results.append({"title": title, "body": body[:320], "href": url, "search_engine": "yandex"})
+            if len(results) >= num_results:
+                break
+        logger.info("Found %s Yandex results for query: %s", len(results), query)
+        return results
+    except Exception as exc:
+        logger.debug("Yandex search failed for '%s': %s", query, exc)
+        return []
+
+
+# ── Multi-engine search: query ALL engines, merge results ──
+SEARCH_ENGINE_ORDER = [
+    ("ddg", search_with_ddgs),
+    ("bing", search_with_bing),
+    ("google", search_with_google),
+    ("yahoo", search_with_yahoo),
+    ("yandex", search_with_yandex),
+]
+
+
+def multi_engine_search(query: str, num_results: int = 8, timelimit: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Query available search engines in order, stop early if we have enough results."""
+    all_results: List[Dict[str, Any]] = []
+    seen_urls: set = set()
+    target = num_results  # stop when we have this many unique results
+
+    for engine_name, search_fn in SEARCH_ENGINE_ORDER:
+        if len(all_results) >= target:
+            logger.info("Reached %d results, skipping remaining engines", target)
+            break
+
+        try:
+            remaining = target - len(all_results)
+            if engine_name == "ddg":
+                raw = search_fn(query, num_results=max(remaining, 5), timelimit=timelimit)
+            elif engine_name == "google":
+                if not _google_is_available():
+                    continue
+                raw = search_fn(query, num_results=remaining)
+            else:
+                raw = search_fn(query, num_results=remaining)
+        except Exception as exc:
+            logger.debug("Engine %s failed: %s", engine_name, exc)
             continue
-        seen_urls.add(url)
-        merged.append(result)
-    return merged
+
+        added = 0
+        for r in raw:
+            url = r.get("href", "")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            r.setdefault("search_engine", engine_name)
+            all_results.append(r)
+            added += 1
+
+        logger.info("Engine '%s': +%d results (total %d)", engine_name, added, len(all_results))
+
+    return all_results
 
 
 def _search_with_exa(query: str, include_domains: List[str], num_results: int = 3) -> Dict[str, Any]:
@@ -619,18 +770,27 @@ def _collect_analysis_sources(
     stat_type: str,
     context_terms: Optional[str],
     sites: List[str],
+    max_queries: int = 2,
 ) -> Dict[str, Any]:
+    """Call AI search engines (Exa/Tavily) for enrichment. Limited to max_queries per entity."""
     snippets: List[Dict[str, Any]] = []
     answers: List[str] = []
     used_engines = set()
     normalized_answers = set()
+    queries_made = 0
 
     if not sites:
         return {"answers": [], "snippets": [], "used_engines": []}
 
     for site in sites[:2]:
+        if queries_made >= max_queries:
+            break
         queries = _build_site_queries(entity, site, stat_type, context_terms)
         for query in queries[:1]:
+            if queries_made >= max_queries:
+                break
+            queries_made += 1
+            logger.info("AI search query %d/%d: %s", queries_made, max_queries, query)
             payload = _merge_analysis_results(query, [site])
 
             for answer in payload.get("answers", []):
@@ -644,7 +804,7 @@ def _collect_analysis_sources(
                 url = result.get("href", "")
                 title = result.get("title", "")
                 body = result.get("body", "")
-                if not _is_result_valid(entity, title, body, ""):
+                if not _is_result_valid(entity, title, body, "", url):
                     continue
 
                 engine = result.get("search_engine", "unknown")
@@ -667,11 +827,28 @@ def _collect_analysis_sources(
         if len(snippets) >= SEARCH_ANALYSIS_MAX_SNIPPETS:
             break
 
+    logger.info("AI search done: %d queries, %d snippets found", queries_made, len(snippets))
     return {
         "answers": answers[:4],
         "snippets": snippets,
         "used_engines": sorted(used_engines),
     }
+
+
+_DISCIPLINE_SEARCH_LABEL = {
+    "football": "football soccer",
+    "tennis": "tennis ATP WTA",
+    "table_tennis": "table tennis",
+    "hockey": "hockey NHL KHL",
+    "basketball": "basketball NBA",
+    "volleyball": "volleyball",
+    "mma": "MMA UFC",
+    "boxing": "boxing",
+    "cs2": "CS2 esports",
+    "dota2": "Dota 2 esports",
+    "lol": "League of Legends esports",
+    "valorant": "Valorant esports",
+}
 
 
 def collect_validated_sources(
@@ -683,76 +860,133 @@ def collect_validated_sources(
     timelimit: str = "m",
     context_terms: Optional[str] = None,
 ) -> Dict[str, Any]:
-    sites = _get_sites_for_query(discipline, entity, context_terms)
-    windows_to_try = [timelimit]
-    if SEARCH_ENABLE_BROAD_WINDOW:
-        windows_to_try.append(None)
+    all_sites = DISCIPLINE_SOURCE_CONFIG.get(discipline, [])
+    trusted_domains = {entry["site"] for entry in all_sites}
     validated_sources: List[Dict[str, Any]] = []
-    used_window = timelimit
+    unvalidated_results: List[Dict[str, Any]] = []
+    seen_urls: set = set()
 
-    for window in windows_to_try:
-        validated_sources = []
-        used_window = window or "all"
+    discipline_label = _DISCIPLINE_SEARCH_LABEL.get(discipline, discipline)
+    context_suffix = f" {context_terms}" if context_terms else ""
 
-        for site in sites:
-            results: List[Dict[str, Any]] = []
-            for query in _build_site_queries(entity, site, stat_type, context_terms):
-                results = _merge_search_results(query, window or None)
-                if results:
-                    break
+    def _validate_and_collect(results: List[Dict[str, Any]]) -> None:
+        """Validate results and add to validated_sources / unvalidated_results."""
+        for result in results:
+            if len(validated_sources) >= min_sources:
+                return
+            url = result.get("href", "")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = result.get("title", "")
+            body = result.get("body", "")
+            if not _is_result_valid(entity, title, body, "", url):
+                unvalidated_results.append(result)
+                continue
+            excerpt = _fetch_page_excerpt(url, entity) if url else ""
+            source = _extract_source(url)
+            is_trusted = any(domain in url for domain in trusted_domains)
+            validated_sources.append({
+                "site": source,
+                "source": source,
+                "search_engine": result.get("search_engine", "unknown"),
+                "title": title,
+                "body": body[:260],
+                "excerpt": excerpt[:640],
+                "href": url,
+                "validated": True,
+                "trusted_domain": is_trusted,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            })
 
-            best_match = None
+    # ── Phase 1: broad search across ALL free engines ──
+    broad_query = f"{entity} {discipline_label} {stat_type}{context_suffix}"
+    logger.info("Phase 1 — broad search: %s", broad_query)
+    broad_results = multi_engine_search(broad_query, num_results=10, timelimit=timelimit)
 
-            for result in results:
-                url = result.get("href", "")
-                source = _extract_source(url)
-                excerpt = _fetch_page_excerpt(url, entity) if url else ""
-                title = result.get("title", "")
-                body = result.get("body", "")
-                if not _is_result_valid(entity, title, body, excerpt):
-                    continue
+    # Sort broad results: trusted domains first
+    broad_results.sort(
+        key=lambda r: not any(d in r.get("href", "") for d in trusted_domains)
+    )
+    _validate_and_collect(broad_results)
+    logger.info("After Phase 1: %d validated for '%s'", len(validated_sources), entity)
 
-                best_match = {
-                    "site": site,
-                    "source": source,
-                    "search_engine": result.get("search_engine", "unknown"),
-                    "title": title,
-                    "body": body[:260],
-                    "excerpt": excerpt[:520],
-                    "href": url,
-                    "validated": True,
-                    "checked_at": datetime.now(timezone.utc).isoformat(),
-                }
-                break
-
-            if best_match:
-                validated_sources.append(best_match)
+    # ── Phase 2: targeted site: queries — only if Phase 1 insufficient ──
+    if len(validated_sources) < min_sources:
+        sites_to_query = _get_sites_for_query(discipline, entity, context_terms)
+        for site in sites_to_query[:3]:
             if len(validated_sources) >= min_sources:
                 break
+            site_query = f"{entity} {stat_type}{context_suffix} site:{site}"
+            logger.info("Phase 2 — site search: %s", site_query)
+            # Bing has best site: operator support and is fast
+            try:
+                raw = search_with_bing(site_query, num_results=3)
+            except Exception:
+                raw = []
+            if not raw:
+                try:
+                    raw = search_with_ddgs(site_query, num_results=3, timelimit=timelimit)
+                except Exception:
+                    raw = []
+            for r in raw:
+                r.setdefault("search_engine", "site_search")
+            _validate_and_collect(raw)
+        logger.info("After Phase 2: %d validated for '%s'", len(validated_sources), entity)
 
-        if len(validated_sources) >= min_sources:
-            break
+    logger.info("Free engines total: %d validated sources for '%s'", len(validated_sources), entity)
 
-    analysis_sources = _collect_analysis_sources(
-        entity,
-        discipline,
-        stat_type,
-        context_terms,
-        sites,
-    )
+    # ── Phase 3: AI search (Exa/Tavily) — only when free engines lack data ──
+    analysis_sources: Dict[str, Any] = {"answers": [], "snippets": [], "used_engines": []}
+    if len(validated_sources) < min_sources:
+        logger.info("Free engines insufficient (%d/%d) — calling AI search (max 2 queries)",
+                     len(validated_sources), min_sources)
+        analysis_sources = _collect_analysis_sources(
+            entity, discipline, stat_type, context_terms,
+            [e["site"] for e in all_sites],
+            max_queries=2,
+        )
+    else:
+        logger.info("Free engines sufficient (%d/%d) — skipping AI search",
+                     len(validated_sources), min_sources)
 
+    # ── Fallback: if still nothing validated, take raw results as-is ──
+    if not validated_sources and unvalidated_results:
+        logger.info("Fallback: taking %d unvalidated results for '%s'",
+                     len(unvalidated_results), entity)
+        for result in unvalidated_results[:min_sources]:
+            url = result.get("href", "")
+            title = result.get("title", "")
+            body = result.get("body", "")
+            excerpt = _fetch_page_excerpt(url, entity) if url else ""
+            source = _extract_source(url)
+            is_trusted = any(domain in url for domain in trusted_domains)
+            validated_sources.append({
+                "site": source,
+                "source": source,
+                "search_engine": result.get("search_engine", "unknown"),
+                "title": title,
+                "body": body[:260],
+                "excerpt": excerpt[:640],
+                "href": url,
+                "validated": False,
+                "trusted_domain": is_trusted,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+    enough = len(validated_sources) >= min_sources
     return {
         "entity": entity,
         "discipline": discipline,
         "stat_type": stat_type,
         "min_sources": min_sources,
-        "freshness_window": used_window,
+        "freshness_window": timelimit,
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "validated_sources": validated_sources,
         "analysis_sources": analysis_sources,
         "validated_count": len(validated_sources),
-        "enough_sources": len(validated_sources) >= min_sources,
-        "status": "validated" if len(validated_sources) >= min_sources else "insufficient_sources",
+        "enough_sources": enough,
+        "status": "validated" if enough else "insufficient_sources",
     }
 
 
@@ -781,7 +1015,7 @@ def validate_match_request(match_text: str, date_text: str, discipline: str) -> 
                 discipline_key,
                 "official team player roster ranking profile recent results current season",
                 min_sources=1,
-                timelimit="w",
+                timelimit="m",
                 context_terms=None,
             )
         )

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import asyncio
 import logging
@@ -181,7 +181,7 @@ def _create_groq_request(model_name: str, system_prompt: str, contents: str):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": contents},
         ],
-        max_completion_tokens=512,
+        max_completion_tokens=2000,
         temperature=0.2,
         timeout=30.0
     )
@@ -639,100 +639,6 @@ def get_discipline_prompt(discipline: str, discipline_key: str = None) -> str:
     # Fallback
     return DISCIPLINE_PROMPTS.get("киберспорт") + OUTPUT_CONTRACT_SUFFIX
 
-# --- SYSTEM PROMPT (DEPRECATED - используем DISCIPLINE_PROMPTS) ---
-SYSTEM_INSTRUCTION = """
-Ты — элитный спортивный аналитик.
-
-СТРОГИЕ ПРАВИЛА:
-- Анализируй только указанный матч
-- Используй ТОЛЬКО предоставленные данные
-- Не выдумывай
-- Используй только самые свежие данные
-- Для каждого анализа ориентируйся на не менее чем 2 источника
-- Если доступен только один источник, обязательно найди второй источник для детальной аналитики
-- Не выводи информацию об источниках пользователю напрямую
-
-ЛОГИКА:
-
-Футбол:
-- домашнее поле
-- составы и ротация
-- травмы, дисквалификации, замены
-- мотивация, форма, турнирный контекст
-
-Хоккей:
-- форма вратаря и спецбригады
-- качество льда, домашнее/выездное поле
-- травмы и штрафное время
-- темп и исполнение большинства
-
-Баскетбол:
-- темп и защита
-- сила скамейки и ротация
-- трёхочковые и подборы
-- травмы ключевых игроков
-
-Киберспорт:
-- CS2: HLTV, Liquipedia, карты, рейтинги, составы, история личных встреч, замены
-- Dota 2: Dotabuff, Stratz, Liquipedia, винрейты героев, составы и текущий патч
-- LoL: Oracle's Elixir, Liquipedia, драфт, мета, состояние линий
-- формат (Bo1/Bo3/Bo5), пул карт, ротации, замены, форма команды, тренерские правки
-
-Футбол:
-- WhoScored / SofaScore: оценки игроков, тепловые карты, прогноз состава, список травм
-- Transfermarkt: «вес» команды, трансферы, ротация состава
-- Flashscore / MyScore: форма за 5 матчей, H2H, оперативные данные
-- домашнее поле, состав, травмы, дисквалификации, мотивация, стиль игры
-
-Хоккей:
-- NHL.com / ESPN: продвинутые метрики, отчёты по травмам
-- множество: вратарь, спецбригады, лед, домашняя/выездная площадка
-- травмы, ротации линий, эффективность большинства, темп
-
-Баскетбол:
-- NBA.com / ESPN: продвинутые метрики, отчёты по травмам
-- темп и защита, сила скамейки, ротация, трёхочковые, подборы, травмы ключевых игроков
-
-Теннис:
-- ATP / WTA Tour: официальный рейтинг, статистика на покрытии, личные встречи
-- Tennis Explorer: H2H, фаворит/аутсайдер, текущий график
-- покрытие, погодные условия, усталость, подача и приём, мотивация
-
-Настольный теннис:
-- TT-Cup / Setka Cup: последние 10-15 матчей, быстрый контроль формы
-- скорость и реакция, подача и возврат, стиль игры, тактика, усталость
-
-MMA/Бокс:
-- Sherdog / Tapology: история боёв, антропометрия, способ победы
-- BoxRec: официальные рейтинги, активность, соперники
-- стиль, размах рук, выносливость, весогонка, травмы, защита, борьба
-
-Волейбол:
-- WorldofVolley: трансферы, травмы, новости звёзд
-- Volleyball World (FIVB): официальные рейтинги, Лига Наций, сборные
-- Flashscore / SofaScore: статистика по сетам, форма к 4-5 сету
-- CEV / Data Project: европейские чемпионаты, итальянские лиги, эффективность приёма и атаки
-- связующий, приём, домашняя площадка, перелёты/jet lag, замены, глубина состава
-
-БАНК:
->80% → 6%
-66-80% → 3%
-55-65% → 1%
-<55% → пропуск
-
-ФОРМАТ:
-
-📊 **Матч:** ...
-🏆 **Исход:** ...
-📈 **Вероятность:** ...%
-💰 **СТАВКА:** ...%
-
-📝 **Суть:**
-• Форма:
-• Состав:
-• Мотивация:
-"""
-
 # --- FSM ---
 class OrderAnalysis(StatesGroup):
     waiting_discipline = State()
@@ -856,7 +762,7 @@ async def set_subdiscipline(message: types.Message, state: FSMContext):
 
 def get_date_keyboard() -> types.InlineKeyboardMarkup:
     """Создает клавиатуру с датами на 7 дней от сегодня"""
-    today = datetime(2026, 3, 30)  # Фиксированная дата сегодня
+    today = datetime.now()
     
     kb = []
     for i in range(7):
@@ -1104,7 +1010,51 @@ async def admin_user_details(message: types.Message):
 async def set_team1(message: types.Message, state: FSMContext):
     data = await state.get_data()
     discipline = data.get('full_discipline') or data.get('discipline', '')
-    resolution = resolve_entity_name(message.text.strip(), discipline=discipline)
+    raw_input = message.text.strip()
+    sides = parse_match_sides(raw_input)
+
+    # Поддержка старого UX: пользователь может сразу ввести "Team A vs Team B" или "Team A против Team B".
+    if len(sides) == 2:
+        team1_resolution = resolve_entity_name(sides[0], discipline=discipline)
+        team2_resolution = resolve_entity_name(sides[1], discipline=discipline)
+        resolved_match = resolve_match_entities(team1_resolution["corrected"], team2_resolution["corrected"], discipline=discipline)
+        team1 = resolved_match["team1"]["corrected"]
+        team2 = resolved_match["team2"]["corrected"]
+        match_text = resolved_match["match"]
+
+        touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, match_text=match_text)
+        log_user_event(
+            message.from_user.id,
+            "set_match_direct",
+            {
+                "team1": team1,
+                "team2": team2,
+                "match": match_text,
+            },
+        )
+
+        await state.update_data(
+            team1=team1,
+            team2=team2,
+            team1_original=team1_resolution["original"],
+            team2_original=team2_resolution["original"],
+            match=match_text,
+        )
+
+        keyboard = get_date_keyboard()
+        await message.answer(
+            (
+                f"🏆 Матч: {team1} vs {team2}\n"
+                f"{format_name_correction('Первая команда', team1_resolution)}\n"
+                f"{format_name_correction('Соперник', team2_resolution)}\n\n"
+                "📅 Выберите дату матча:"
+            ),
+            reply_markup=keyboard
+        )
+        await state.set_state(OrderAnalysis.waiting_date)
+        return
+
+    resolution = resolve_entity_name(raw_input, discipline=discipline)
     team1 = resolution["corrected"]
     touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, match_text=team1)
     log_user_event(message.from_user.id, "set_team1", {"team1": team1, "original": resolution["original"], "reason": resolution["reason"]})
@@ -1209,7 +1159,9 @@ async def handle_date_selection(callback: types.CallbackQuery, state: FSMContext
         await callback.message.answer(
             "❌ Не удалось разобрать данные матча. Пожалуйста, укажите матч в формате 'Team A vs Team B' или 'Team A против Team B'"
         )
-        await state.clear()
+        await state.update_data(team1=None, team2=None, match=None, found_match=None)
+        await callback.message.answer("Введите название первой команды (или игрока) заново:")
+        await state.set_state(OrderAnalysis.waiting_team1)
     
     # Старый ответ в конце удаляем
     # try:
@@ -1253,7 +1205,9 @@ async def check_match_text(message: types.Message, state: FSMContext):
         await start_analysis(message, state)
     else:
         await message.answer("❌ Не удалось разобрать данные матча. Пожалуйста, укажите матч в формате 'Team A vs Team B' или 'Team A против Team B'")
-        await state.clear()
+        await state.update_data(team1=None, team2=None, match=None, found_match=None)
+        await message.answer("Введите название первой команды (или игрока) заново:")
+        await state.set_state(OrderAnalysis.waiting_team1)
 
 
 @dp.message(OrderAnalysis.confirming_match)
@@ -1326,7 +1280,7 @@ async def start_analysis(message: types.Message, state: FSMContext):
                     discipline,
                     match_context=match_context,
                 ),
-                timeout=25,
+                timeout=45,
             )
         except asyncio.TimeoutError:
             logger.warning("Timed out collecting search data for %s", analysis_match)

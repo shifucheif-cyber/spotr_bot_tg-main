@@ -1,0 +1,38 @@
+============================================================
+TEST: Full pipeline -- Las Palmas vs Granada (football)
+============================================================
+
+Time: 54.7s
+Result length: 2784 chars
+Has 'validated': True
+Has sources info: True
+
+--- First 1200 chars ---
+[F] ????: LAS PALMAS vs GRANADA
+
+--- LAS PALMAS ---
+?????????: validated
+???????????? ??????????: 2
+??????? ??????????: 2
+???? ???????? ??????: m
+?????????: 2026-04-02T15:52:44.044041+00:00
+
+???????? 1: las-vegas-airport.com
+?????????: Las Vegas Airport
+?????????: ddg
+???????: Las Vegas Airport (IATA: LAS, ICAO: KLAS, FAA LID: LAS), officially known as Harry Reid International Airport and formerly known as McCarran International Airport, is the main commercial airport serving ?
+??????? ?? ????????: Las Vegas Airport (LAS) Las Vegas Airport Informational Guide to Harry Reid International Airport (LAS) - formerly McCarran Airport - NON OFFICIAL Flights + Arrivals Departures Flight Status Airlines Terminals + Terminal 1 Terminal 3 Parking Transport + Bus Taxi Shuttle Transfers Car Rental More Info + Services Lounges Review Las Vegas Airport (LAS) Arrivals Departures Find the most important information about Las Vegas
+??????: https://www.las-vegas-airport.com/
+???????? 2: las-vegas-airport.com
+?????????: Harry Reid Las Vegas Airport (LAS) Arrivals - Today
+?????????: ddg
+???????: Arrivals at Harry Reid Las Vegas Airport (LAS) - Today Check the status of your flight to Harry Reid Las Veg
+---
+
+--- STDERR (last 500) ---
+s`! Use `pip install ddgs` instead.
+  with DDGS(timeout=REQUEST_TIMEOUT) as ddgs:
+D:\spotr_bot_tg-main\services\search_engine.py:440: RuntimeWarning: This package (`duckduckgo_search`) has been renamed to `ddgs`! Use `pip install ddgs` instead.
+  with DDGS(timeout=REQUEST_TIMEOUT) as ddgs:
+D:\spotr_bot_tg-main\services\search_engine.py:440: RuntimeWarning: This package (`duckduckgo_search`) has been renamed to `ddgs`! Use `pip install ddgs` instead.
+  with DDGS(timeout=REQUEST_TIMEOUT) as ddgs:

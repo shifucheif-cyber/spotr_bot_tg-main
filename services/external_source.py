@@ -15,8 +15,18 @@ def search_event_thesportsdb(match_name: str) -> dict | None:
         data = response.json()
         events = data.get("event")
         if not events:
+            logging.debug("No events found in TheSportsDB for '%s'", match_name)
             return None
         return events[0]
-    except Exception as e:
-        logging.warning("External source search failed for '%s': %s", match_name, e)
+    except requests.ConnectionError as e:
+        logging.warning("TheSportsDB connection error for '%s': %s", match_name, e)
+        return None
+    except requests.Timeout as e:
+        logging.warning("TheSportsDB timeout for '%s': %s", match_name, e)
+        return None
+    except requests.HTTPError as e:
+        logging.warning("TheSportsDB HTTP error for '%s': %s", match_name, e)
+        return None
+    except (ValueError, KeyError) as e:
+        logging.warning("TheSportsDB parse error for '%s': %s", match_name, e)
         return None

@@ -10,53 +10,57 @@ from services.volleyball_service import get_volleyball_data
 from services.basketball_service import get_basketball_data
 
 
+# Маршруты: (ключевое слово -> (функция, kwargs))
+# Порядок важен: более специфичные ключи проверяются первыми
+_ROUTES = [
+    # Настольный теннис (до обычного тенниса!)
+    ("настольный",    lambda m, mc: get_table_tennis_data(m, match_context=mc)),
+    ("table_tennis",  lambda m, mc: get_table_tennis_data(m, match_context=mc)),
+    ("table",         lambda m, mc: get_table_tennis_data(m, match_context=mc)),
+    # Киберспорт
+    ("киберспорт",    None),  # placeholder — handled with discipline passthrough
+    ("cs2",           None),
+    ("cs:",           None),
+    ("dota",          None),
+    ("lol",           None),
+    ("league",        None),
+    ("valorant",      None),
+    # Футбол
+    ("футбол",        lambda m, mc: get_football_data(m, match_context=mc)),
+    ("football",      lambda m, mc: get_football_data(m, match_context=mc)),
+    ("soccer",        lambda m, mc: get_football_data(m, match_context=mc)),
+    # Хоккей
+    ("хоккей",        lambda m, mc: get_hockey_data(m, match_context=mc)),
+    ("hockey",        lambda m, mc: get_hockey_data(m, match_context=mc)),
+    # Теннис (большой)
+    ("теннис",        lambda m, mc: get_tennis_data(m, match_context=mc)),
+    ("tennis",        lambda m, mc: get_tennis_data(m, match_context=mc)),
+    # Бокс (до MMA!)
+    ("бокс",          lambda m, mc: get_mma_data(m, subdiscipline="boxing", match_context=mc)),
+    ("boxing",        lambda m, mc: get_mma_data(m, subdiscipline="boxing", match_context=mc)),
+    # MMA
+    ("мма",           lambda m, mc: get_mma_data(m, subdiscipline="mma", match_context=mc)),
+    ("mma",           lambda m, mc: get_mma_data(m, subdiscipline="mma", match_context=mc)),
+    # Волейбол
+    ("волейбол",      lambda m, mc: get_volleyball_data(m, match_context=mc)),
+    ("volleyball",    lambda m, mc: get_volleyball_data(m, match_context=mc)),
+    # Баскетбол
+    ("баскетбол",     lambda m, mc: get_basketball_data(m, match_context=mc)),
+    ("basketball",    lambda m, mc: get_basketball_data(m, match_context=mc)),
+]
+
+
 def _get_match_data_sync(match, discipline, match_context=None):
     d = discipline.lower()
 
-    # КИБЕРСПОРТ - маршрутизация конкретной игры
-    if "киберспорт" in d or "cs2" in d or "cs:" in d:
-        return get_esports_data(match, discipline, match_context=match_context)
-    elif "dota" in d or "dota2" in d or "dota:" in d:
-        return get_esports_data(match, discipline, match_context=match_context)
-    elif "lol" in d or "league" in d or "lol:" in d:
-        return get_esports_data(match, discipline, match_context=match_context)
-    elif "valorant" in d or "valorant:" in d:
-        return get_esports_data(match, discipline, match_context=match_context)
+    for keyword, handler in _ROUTES:
+        if keyword in d:
+            if handler is None:
+                # Киберспорт — передаём discipline для выбора конкретной игры
+                return get_esports_data(match, discipline, match_context=match_context)
+            return handler(match, match_context)
 
-    # ФУТБОЛ
-    elif "футбол" in d or "football" in d or "soccer" in d:
-        return get_football_data(match, match_context=match_context)
-
-    # ХОККЕЙ
-    elif "хоккей" in d or "hockey" in d:
-        return get_hockey_data(match, match_context=match_context)
-
-    # ТЕННИС - большой теннис или настольный
-    elif "теннис:" in d and "настольный" in d:
-        # Настольный теннис
-        return get_table_tennis_data(match, match_context=match_context)
-    elif "table" in d or "настольный" in d or "table_tennis" in d:
-        return get_table_tennis_data(match, match_context=match_context)
-    elif "теннис" in d or "tennis" in d:
-        # Большой теннис (по умолчанию)
-        return get_tennis_data(match, match_context=match_context)
-
-    # ММА/БОКС - выбор между ММА и Бокс
-    elif "boxing" in d or "бокс" in d:
-        return get_mma_data(match, subdiscipline="boxing", match_context=match_context)
-    elif "mma" in d or "мма" in d:
-        return get_mma_data(match, subdiscipline="mma", match_context=match_context)
-
-    # ВОЛЕЙБОЛ
-    elif "волейбол" in d or "volleyball" in d:
-        return get_volleyball_data(match, match_context=match_context)
-
-    # БАСКЕТБОЛ
-    elif "баскетбол" in d or "basketball" in d:
-        return get_basketball_data(match, match_context=match_context)
-
-    else:
-        return f"Нет данных для {discipline}"
+    return f"Нет данных для {discipline}"
 
 
 async def get_match_data(match, discipline, match_context=None):
