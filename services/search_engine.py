@@ -17,6 +17,10 @@ try:
 except ImportError:
     TavilyClient = None
 try:
+    from exa_py import Exa as ExaClient
+except ImportError:
+    ExaClient = None
+try:
     from ddgs import DDGS
 except ImportError:
     from duckduckgo_search import DDGS
@@ -673,6 +677,37 @@ def _search_with_exa(query: str, include_domains: List[str], num_results: int = 
     if not EXA_API_KEY:
         return {"answer": "", "results": []}
 
+    # ── Method 1: exa-py SDK (preferred) ──
+    if ExaClient is not None:
+        try:
+            exa = ExaClient(api_key=EXA_API_KEY)
+            kwargs: Dict[str, Any] = {
+                "query": query,
+                "num_results": num_results,
+                "text": {"max_characters": 900},
+                "type": "auto",
+            }
+            if include_domains:
+                kwargs["include_domains"] = include_domains
+            response = exa.search_and_contents(**kwargs)
+            results: List[Dict[str, Any]] = []
+            for item in response.results:
+                snippet = (getattr(item, "text", "") or "").strip()
+                if not snippet:
+                    highlights = getattr(item, "highlights", None) or []
+                    if isinstance(highlights, list):
+                        snippet = " ".join(str(h).strip() for h in highlights if h).strip()
+                results.append({
+                    "title": (getattr(item, "title", "") or "").strip(),
+                    "body": snippet,
+                    "href": (getattr(item, "url", "") or "").strip(),
+                    "search_engine": "exa",
+                })
+            return {"answer": "", "results": results}
+        except Exception as exc:
+            logger.warning("Exa SDK search failed for query '%s': %s", query, exc)
+
+    # ── Method 2: raw HTTP fallback ──
     payload: Dict[str, Any] = {
         "query": query,
         "numResults": num_results,
@@ -694,24 +729,22 @@ def _search_with_exa(query: str, include_domains: List[str], num_results: int = 
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
-        logger.warning("Exa analysis search failed for query '%s': %s", query, exc)
+        logger.warning("Exa HTTP search failed for query '%s': %s", query, exc)
         return {"answer": "", "results": []}
 
-    results: List[Dict[str, Any]] = []
+    results = []
     for item in data.get("results", []):
         snippet = (item.get("text") or "").strip()
         if not snippet:
             highlights = item.get("highlights") or []
             if isinstance(highlights, list):
                 snippet = " ".join(str(highlight).strip() for highlight in highlights if highlight).strip()
-        results.append(
-            {
-                "title": (item.get("title") or "").strip(),
-                "body": snippet,
-                "href": (item.get("url") or "").strip(),
-                "search_engine": "exa",
-            }
-        )
+        results.append({
+            "title": (item.get("title") or "").strip(),
+            "body": snippet,
+            "href": (item.get("url") or "").strip(),
+            "search_engine": "exa",
+        })
 
     return {"answer": "", "results": results}
 
