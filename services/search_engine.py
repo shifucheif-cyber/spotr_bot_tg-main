@@ -681,17 +681,12 @@ def search_with_serper(query: str, num_results: int = 5) -> List[Dict[str, Any]]
         return []
 
 
-# ── Multi-engine search: query ALL engines, merge results ──
-# DDG is primary, others are reserve fallbacks.
-# Google requires ENABLE_GOOGLE_SEARCH=true in env.
-# Bing/Yahoo/Yandex scrapers may need selector updates over time.
+# ── Multi-engine search: DDG (validation) + Serper (primary data) ──
+# Bing/Yahoo/Yandex/Google scrapers disabled — unstable, slow, low value.
+# AI enrichment (Exa/Tavily) handled separately in Phase 3.
 SEARCH_ENGINE_ORDER = [
     ("ddg", search_with_ddgs),
     ("serper", search_with_serper),
-    ("bing", search_with_bing),
-    ("yahoo", search_with_yahoo),
-    ("yandex", search_with_yandex),
-    ("google", search_with_google),
 ]
 
 

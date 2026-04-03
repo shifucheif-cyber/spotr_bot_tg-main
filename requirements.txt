@@ -9,6 +9,5 @@ beautifulsoup4
 lxml
 cloudscraper
 ddgs
-googlesearch-python
 tavily-python
 exa-py

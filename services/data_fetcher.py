@@ -407,7 +407,82 @@ def fetch_match_analysis_data(
         logger.error("Fetch failed for %s: %s", side2, e)
         data2 = None
 
+    # --- Новый блок: сбор тотала и H2H через профильные библиотеки ---
+    total_line = ""
+    h2h_line = ""
+    try:
+        if discipline in ("football", "футбол"):
+            from sportsipy.football.teams import Teams
+            teams = list(Teams())
+            t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
+            t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
+            if t1 and t2:
+                t1_goals = [g for g in t1.schedule.dataframe['points_for'][-5:]]
+                t2_goals = [g for g in t2.schedule.dataframe['points_for'][-5:]]
+                avg_total = (sum(t1_goals) + sum(t2_goals)) / (len(t1_goals) + len(t2_goals))
+                total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
+                h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
+                if not h2h.empty:
+                    h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['points_for'].sum()}:{h2h['points_against'].sum()} по голам"
+        elif discipline in ("hockey", "хоккей"):
+            from sportsipy.nhl.teams import Teams as NHLTeams
+            teams = list(NHLTeams())
+            t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
+            t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
+            if t1 and t2:
+                t1_goals = [g for g in t1.schedule.dataframe['goals_for'][-5:]]
+                t2_goals = [g for g in t2.schedule.dataframe['goals_for'][-5:]]
+                avg_total = (sum(t1_goals) + sum(t2_goals)) / (len(t1_goals) + len(t2_goals))
+                total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
+                h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
+                if not h2h.empty:
+                    h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['goals_for'].sum()}:{h2h['goals_against'].sum()} по шайбам"
+        elif discipline in ("cs2", "csgo", "counter-strike 2"):
+            try:
+                from hltv import HLTV
+                hltv = HLTV()
+                matches = hltv.get_matches()
+                found = [m for m in matches if side1.lower() in m['team1']['name'].lower() and side2.lower() in m['team2']['name'].lower()]
+                if found:
+                    match_id = found[0]['id']
+                    stats = hltv.get_match_stats(match_id)
+                    if stats and 'maps' in stats:
+                        total_maps = sum(m['team1Rounds'] + m['team2Rounds'] for m in stats['maps']) / len(stats['maps'])
+                        total_line = f"🎯 Тотал карт: {total_maps:.2f}"
+            except Exception as e:
+                logger.warning(f"HLTV fetch failed: {e}")
+        elif discipline in ("basketball", "баскетбол"):
+            try:
+                from sportsipy.nba.teams import Teams as NBATeams
+                teams = list(NBATeams())
+                t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
+                t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
+                if t1 and t2:
+                    t1_pts = [g for g in t1.schedule.dataframe['points_for'][-5:]]
+                    t2_pts = [g for g in t2.schedule.dataframe['points_for'][-5:]]
+                    avg_total = (sum(t1_pts) + sum(t2_pts)) / (len(t1_pts) + len(t2_pts))
+                    total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
+                    h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
+                    if not h2h.empty:
+                        h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['points_for'].sum()}:{h2h['points_against'].sum()} по очкам"
+            except Exception as e:
+                logger.warning(f"NBA fetch failed: {e}")
+        elif discipline in ("volleyball", "волейбол"):
+            # Нет официальной библиотеки, только заглушка
+            total_line = "🎯 Тотал: статистика тотала по сетам/очкам недоступна (нет открытого API)"
+        elif discipline in ("tennis", "теннис"):
+            # Тотал по сетам — среднее за 5 последних матчей, если есть данные
+            total_line = "🎯 Тотал: среднее количество сетов за 5 последних матчей (нет открытого API)"
+        elif discipline in ("table_tennis", "настольный теннис"):
+            total_line = "🎯 Тотал: среднее количество сетов за 5 последних матчей (нет открытого API)"
+    except Exception as e:
+        logger.warning(f"Extra stats fetch failed: {e}")
+
     parts = [f"{emoji} Матч: {side1.upper()} vs {side2.upper()}"]
+    if total_line:
+        parts.append(total_line)
+    if h2h_line:
+        parts.append(h2h_line)
 
     if data1 and data1.get("report"):
         parts.append(f"\n--- {side1.upper()} ---\n{data1['report']}")

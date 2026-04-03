@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
-LLM_FALLBACK_ORDER = ["google", "groq", "deepseek"]
+LLM_FALLBACK_ORDER = ["google", "groq", "sambanova", "deepseek"]
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-1.5")
@@ -50,6 +50,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "compound-beta-mini")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com")
 
+SAMBANOVA_API_KEY = os.getenv("SAMBANOVA_API_KEY")
+SAMBANOVA_MODEL = os.getenv("SAMBANOVA_MODEL", "Meta-Llama-3.3-70B-Instruct")
+SAMBANOVA_BASE_URL = os.getenv("SAMBANOVA_BASE_URL", "https://api.sambanova.ai/v1")
+
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -58,10 +62,10 @@ ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "483078446"))
 if not TG_TOKEN:
     raise ValueError("TELEGRAM_TOKEN не задан")
 
-if not any([GOOGLE_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY]):
-    raise ValueError("Не задан ни один LLM API key: нужен хотя бы один из GOOGLE_API_KEY, GROQ_API_KEY или DEEPSEEK_API_KEY")
+if not any([GOOGLE_API_KEY, GROQ_API_KEY, SAMBANOVA_API_KEY, DEEPSEEK_API_KEY]):
+    raise ValueError("Не задан ни один LLM API key: нужен хотя бы один из GOOGLE_API_KEY, GROQ_API_KEY, SAMBANOVA_API_KEY или DEEPSEEK_API_KEY")
 
-if LLM_PROVIDER not in {"google", "groq", "deepseek"}:
+if LLM_PROVIDER not in {"google", "groq", "sambanova", "deepseek"}:
     logger.warning("Unsupported LLM_PROVIDER=%s. Unified fallback order will be used: %s", LLM_PROVIDER, " -> ".join(LLM_FALLBACK_ORDER))
 
 # --- INIT ---
@@ -100,6 +104,23 @@ if DEEPSEEK_API_KEY:
         logging.warning(f"Failed to initialize DeepSeek client: {e}")
 else:
     logging.info("DeepSeek API key is missing; DeepSeek provider disabled")
+
+sambanova_client = None
+if SAMBANOVA_API_KEY:
+    try:
+        from openai import AsyncOpenAI
+
+        sambanova_client = AsyncOpenAI(
+            api_key=SAMBANOVA_API_KEY,
+            base_url=SAMBANOVA_BASE_URL
+        )
+        logging.info("SambaNova client initialized (model: %s)", SAMBANOVA_MODEL)
+    except ImportError:
+        logging.warning("OpenAI package is not installed; SambaNova provider disabled")
+    except Exception as e:
+        logging.warning(f"Failed to initialize SambaNova client: {e}")
+else:
+    logging.info("SambaNova API key is missing; SambaNova provider disabled")
 
 SELECTED_GOOGLE_MODEL = GOOGLE_MODEL
 
@@ -303,6 +324,33 @@ async def generate_with_deepseek(contents: str, discipline: str = "киберс�
         raise
 
 
+async def generate_with_sambanova(contents: str, discipline: str = "киберспорт", discipline_key: str = None) -> str:
+    """Async SambaNova content generation via OpenAI-compatible API."""
+    if not sambanova_client:
+        raise ValueError("SambaNova client is not configured (API key is missing)")
+
+    try:
+        system_prompt = get_discipline_prompt(discipline, discipline_key)
+        response = await sambanova_client.chat.completions.create(
+            model=SAMBANOVA_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": contents},
+            ],
+            max_tokens=2000,
+            temperature=0.2,
+            timeout=30.0
+        )
+
+        if response.choices and response.choices[0].message.content:
+            logger.info(f"Successfully generated content with SambaNova model {SAMBANOVA_MODEL}")
+            return response.choices[0].message.content
+        raise ValueError("SambaNova returned empty response")
+    except Exception as e:
+        logger.error(f"SambaNova generation failed: {e}")
+        raise
+
+
 async def generate_content(contents: str, discipline: str = "киберспорт", discipline_key: str = None) -> str:
     response = await generate_content_with_metadata(contents, discipline=discipline, discipline_key=discipline_key)
     return response["text"]
@@ -313,6 +361,7 @@ async def generate_content_with_metadata(contents: str, discipline: str = "ки�
         "deepseek": generate_with_deepseek,
         "google": generate_with_google,
         "groq": generate_with_groq,
+        "sambanova": generate_with_sambanova,
     }
     last_error = None
 
@@ -848,6 +897,22 @@ def resolve_match_validation(team1: str, team2: str, date_text: str, discipline:
     validation = validate_match_request(match_text, date_text, discipline_key or discipline)
     if validation.get("status") == "validated" and validation.get("match"):
         return validation["match"], validation.get("report", ""), True
+
+    # Fallback: TheSportsDB API
+    from services.external_source import search_event_thesportsdb
+    event = search_event_thesportsdb(match_text)
+    if event:
+        match_payload = {
+            "sport": discipline_key or discipline,
+            "home": event.get("strHomeTeam", team1),
+            "away": event.get("strAwayTeam", team2),
+            "date": event.get("dateEvent", date_text),
+            "league": event.get("strLeague", ""),
+            "user_discipline": discipline,
+        }
+        report = validation.get("report", "") + "\nTheSportsDB: событие найдено."
+        return match_payload, report, True
+
     return create_fallback_match_data(match_text, date_text, discipline), validation.get("report", ""), False
 
 
@@ -873,42 +938,69 @@ def _extract_contract_field(text: str, patterns: list[str]) -> str:
 
 def format_response_contract(match_text: str, raw_analysis: str, prediction_struct: dict) -> str:
     """
-    Format final response as enforced contract with required fields.
-    Uses structured probability field, not text parsing.
+    Format final response as a brief prognosis card.
+    Extracts short summaries per participant + key prediction fields.
+    No full analysis text — only concise output for the user.
     """
     # Strip JSON blocks from raw analysis (internal data, not for user)
     cleaned_analysis = re.sub(r'```json\s*\{.*?\}\s*```', '', raw_analysis, flags=re.DOTALL).strip()
-    # Also strip bare JSON objects that look like our contract block
     cleaned_analysis = re.sub(r'\{\s*"winner".*?\}', '', cleaned_analysis, flags=re.DOTALL).strip()
 
     prob = prediction_struct.get("probability")
     stake = prediction_struct.get("stake_percent")
     
     winner = _extract_contract_field(cleaned_analysis, [r"Победитель:\s*(.+)", r"Исход:\s*(.+)", r"Прогноз победителя:\s*(.+)"])
-    total = _extract_contract_field(cleaned_analysis, [r"Общий тотал:\s*(.+)", r"Тотал карт:\s*(.+)", r"Тотал:\s*(.+)"])
     score = _extract_contract_field(cleaned_analysis, [r"Прогноз по счету:\s*(.+)", r"Прогноз по сч[её]ту / картам / сетам:\s*(.+)", r"Сч[её]т:\s*(.+)"])
-    
+    total = _extract_contract_field(cleaned_analysis, [r"Тотал:\s*(.+)", r"Total:\s*(.+)", r"Тотал карт:\s*(.+)", r"Total maps:\s*(.+)"])
+
+    # Extract per-participant summaries from LLM output (1-2 sentences each)
+    sides = parse_match_sides(match_text)
+    side1_summary = ""
+    side2_summary = ""
+    if len(sides) == 2:
+        for side_idx, (side, target) in enumerate([(sides[0], "side1_summary"), (sides[1], "side2_summary")]):
+            escaped = re.escape(side)
+            patterns = [
+                rf"\*\*\[?{escaped}\]?\*\*[:\s]*(.+?)(?=\n\s*[•\*\-]|\n\n|\Z)",
+                rf"[•\-]\s*\*\*\[?{escaped}\]?\*\*[:\s]*(.+?)(?=\n\s*[•\*\-]|\n\n|\Z)",
+                rf"{escaped}[:\s]+(.+?)(?=\n|$)",
+            ]
+            for pattern in patterns:
+                m = re.search(pattern, cleaned_analysis, re.I | re.S)
+                if m:
+                    text = m.group(1).strip()
+                    # Trim to max 2 sentences
+                    sentences = re.split(r'(?<=[.!?])\s+', text)
+                    text = ' '.join(sentences[:2]).strip()
+                    if len(text) > 250:
+                        text = text[:247] + "..."
+                    if side_idx == 0:
+                        side1_summary = text
+                    else:
+                        side2_summary = text
+                    break
+
     prob_text = f"{prob:.0f}%" if prob is not None else "не определена"
     stake_text = str(stake) if stake is not None else "ПРОПУСК"
     
-    contract = [
-        "═══════════════════════════════════════",
-        "СТРУКТУРИРОВАННЫЙ ПРОГНОЗ",
-        "═══════════════════════════════════════",
-        f"📊 Матч: {match_text}",
-        f"🏆 Победитель: {winner or '?'}",
-        f"🎯 Тотал: {total or '?'}",
-        f"🔢 Счет: {score or '?'}",
-        f"📈 Вероятность: {prob_text}",
-        f"💰 Ставка: {stake_text}",
-        f"💡 Детали: {prediction_struct.get('recommendation', 'Нет данных')}",
-        "═══════════════════════════════════════",
-        "",
-        "📝 ПОЛНЫЙ АНАЛИЗ:",
-        cleaned_analysis,
+    lines = [f"📊 **Матч:** {match_text}", ""]
+    if total:
+        lines.append(f"🎯 **Тотал:** {total}")
+    if side1_summary and len(sides) == 2:
+        lines.append(f"• **{sides[0]}:** {side1_summary}")
+    if side2_summary and len(sides) == 2:
+        lines.append(f"• **{sides[1]}:** {side2_summary}")
+    if side1_summary or side2_summary:
+        lines.append("")
+    lines += [
+        f"🏆 **Победитель:** {winner or '?'}",
+        f"📈 **Вероятность:** {prob_text}",
+        f"🔢 **Счёт:** {score or '?'}",
+        f"💰 **Ставка:** {stake_text}",
+        f"💡 {prediction_struct.get('recommendation', '')}",
     ]
     
-    return "\n".join(contract)
+    return "\n".join(lines)
 
 
 def split_long_message(text: str, max_length: int = 4000) -> list[str]:
