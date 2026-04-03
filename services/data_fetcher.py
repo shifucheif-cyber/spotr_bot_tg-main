@@ -125,7 +125,7 @@ class CS2Fetcher(DataFetcher):
             return self.build_validated_payload(
                 team_name,
                 "cs2",
-                "ranking roster maps recent results",
+                "HLTV rating roster map pool ban pick player form recent results roster changes",
                 "team",
                 context_terms=context_terms,
             )
@@ -151,7 +151,7 @@ class CS2Fetcher(DataFetcher):
             return self.build_validated_payload(
                 f"{team1} vs {team2}",
                 "cs2",
-                "h2h roster maps recent results",
+                "h2h map veto roster form HLTV rating recent results",
                 "match",
                 context_terms=context_terms,
             )
@@ -165,18 +165,18 @@ class EsportsGameFetcher(DataFetcher):
 
     GAME_CONFIG = {
         "dota2": {
-            "team_stat_type": "hero meta pub stats pro player form recent results",
-            "match_stat_type": "stand-ins brackets hero meta recent results",
+            "team_stat_type": "hero pool draft meta patch winrate early game aggression roster form recent results",
+            "match_stat_type": "h2h stand-ins draft meta hero bans brackets recent results",
             "team_search": search_dota_stats,
         },
         "lol": {
-            "team_stat_type": "gold per minute objective control draft form recent results",
-            "match_stat_type": "draft roster changes objective control recent results",
+            "team_stat_type": "champion priority draft meta dragon baron control early game gold lead roster form recent results",
+            "match_stat_type": "h2h draft champion bans roster changes objective control recent results",
             "team_search": search_lol_stats,
         },
         "valorant": {
-            "team_stat_type": "map stats agent stats lineup recent results",
-            "match_stat_type": "map stats agents roster changes recent results",
+            "team_stat_type": "agent picks map win rates clutch stats eco rounds ACS rating roster form recent results",
+            "match_stat_type": "h2h map veto agent picks roster changes clutch stats recent results",
             "team_search": search_valorant_stats,
         },
     }
@@ -227,7 +227,7 @@ class FootballFetcher(DataFetcher):
             return self.build_validated_payload(
                 team_name,
                 "football",
-                "injuries lineup xg recent results",
+                "injuries suspensions lineup xG cards home away form recent results standings motivation",
                 "team",
                 context_terms=context_terms,
             )
@@ -246,7 +246,7 @@ class TennisFetcher(DataFetcher):
             return self.build_validated_payload(
                 player_name,
                 "tennis",
-                "ranking h2h surface form recent matches",
+                "ranking h2h surface win rate serve percentage break points injuries fatigue recent matches form",
                 "player",
                 context_terms=context_terms,
             )
@@ -262,9 +262,9 @@ class MMAFetcher(DataFetcher):
         super().__init__()
         self._discipline = "boxing" if subdiscipline == "boxing" else "mma"
         self._stat_type = (
-            "record titles ranking opposition recent fight"
+            "record titles ranking opposition reach punch output KO ratio power footwork recent fight camp"
             if self._discipline == "boxing"
-            else "record reach striking takedowns recent fight"
+            else "record reach striking accuracy takedown defense cardio ground game submissions recent fight camp"
         )
 
     def fetch_fighter_info(self, fighter_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -293,7 +293,7 @@ class BasketballFetcher(DataFetcher):
             return self.build_validated_payload(
                 team_name,
                 "basketball",
-                "injuries lineup pace rating recent games",
+                "injuries lineup pace offensive defensive rating rebounds turnovers bench scoring home away form recent results standings",
                 "team",
                 context_terms=context_terms,
             )
@@ -312,7 +312,7 @@ class HockeyFetcher(DataFetcher):
             return self.build_validated_payload(
                 team_name,
                 "hockey",
-                "injuries roster corsi recent games",
+                "injuries roster power play penalty kill goalie save percentage home away form recent results standings h2h",
                 "team",
                 context_terms=context_terms,
             )
@@ -331,7 +331,7 @@ class TableTennisFetcher(DataFetcher):
             return self.build_validated_payload(
                 player_name,
                 "table_tennis",
-                "ranking results recent matches",
+                "ranking h2h style matchup recent series results form world tour standings",
                 "player",
                 context_terms=context_terms,
             )
@@ -350,7 +350,7 @@ class VolleyballFetcher(DataFetcher):
             return self.build_validated_payload(
                 team_name,
                 "volleyball",
-                "roster injuries recent matches",
+                "roster injuries serve reception attack efficiency setter form home away recent results standings h2h",
                 "team",
                 context_terms=context_terms,
             )

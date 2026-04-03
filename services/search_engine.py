@@ -135,28 +135,46 @@ DISCIPLINE_SOURCE_CONFIG = {
         {"site": "rtt-tennis.ru", "label": "RTT Tennis", "focus": "russian tennis tour draws rankings juniors adults", "region": "ru"},
         {"site": "tennisexplorer.com", "label": "Tennis Explorer", "focus": "h2h surface results"},
         {"site": "ultimatetennisstatistics.com", "label": "Ultimate Tennis Statistics", "focus": "fatigue first serve second serve physical indicators"},
+        {"site": "flashscore.com", "label": "Flashscore Tennis", "focus": "live scores results h2h tennis rankings"},
+        {"site": "sofascore.com", "label": "SofaScore Tennis", "focus": "tennis rankings h2h stats recent form"},
+        {"site": "atptour.com", "label": "ATP Tour", "focus": "atp rankings stats player profile results"},
+        {"site": "wtatennis.com", "label": "WTA", "focus": "wta rankings stats player profile results"},
     ],
     "table_tennis": [
         {"site": "ittf.com", "label": "ITTF", "focus": "official ranking major tournament results"},
         {"site": "tabletennis-guide.com", "label": "Table Tennis Guide", "focus": "equipment pips inverted style matchup"},
+        {"site": "tt-rating.ru", "label": "TT Rating", "focus": "russian table tennis ratings results tournaments", "region": "ru"},
+        {"site": "flashscore.com", "label": "Flashscore TT", "focus": "table tennis live scores results h2h"},
+        {"site": "sofascore.com", "label": "SofaScore TT", "focus": "table tennis results rankings h2h stats"},
     ],
     "mma": [
         {"site": "aca-mma.com", "label": "ACA MMA", "focus": "russian league results fighter stats cards", "region": "ru"},
         {"site": "fighttime.ru", "label": "FightTime", "focus": "cis fighter rankings calendars russian mma news", "region": "ru"},
         {"site": "sherdog.com", "label": "Sherdog", "focus": "fight history reach gyms"},
         {"site": "ufcstats.com", "label": "UFC Stats", "focus": "striking accuracy takedown defense control time"},
+        {"site": "tapology.com", "label": "Tapology", "focus": "mma record results upcoming bouts rankings gym"},
+        {"site": "championat.com", "label": "Championat MMA", "focus": "mma news previews analysis results", "region": "ru"},
+        {"site": "espn.com", "label": "ESPN MMA", "focus": "mma rankings schedule results analysis"},
     ],
     "boxing": [
-        {"site": "allboxing.ru", "label": "AllBoxing", "focus": "russian professional boxing news results interviews", "region": "ru"},
         {"site": "boxrec.com", "label": "BoxRec", "focus": "verified record titles strength of opposition"},
+        {"site": "allboxing.ru", "label": "AllBoxing", "focus": "russian professional boxing news results interviews", "region": "ru"},
+        {"site": "tapology.com", "label": "Tapology", "focus": "boxing record results upcoming bouts rankings"},
+        {"site": "ringtv.com", "label": "Ring Magazine", "focus": "boxing news rankings analysis previews"},
+        {"site": "sports.ru", "label": "Sports.ru", "focus": "boxing news previews analysis results", "region": "ru"},
+        {"site": "championat.com", "label": "Championat", "focus": "boxing news previews results analysis", "region": "ru"},
+        {"site": "espn.com", "label": "ESPN Boxing", "focus": "boxing rankings schedule results analysis"},
     ],
     "hockey": [
         {"site": "khl.ru", "label": "KHL Official", "focus": "ice time distance shot speed faceoffs official stats", "region": "ru"},
         {"site": "allhockey.ru", "label": "AllHockey", "focus": "transfers insider news player condition locker room", "region": "ru"},
         {"site": "r-hockey.ru", "label": "R-Hockey", "focus": "player database youth leagues career history", "region": "ru"},
+        {"site": "vfrhl.ru", "label": "VHL Official", "focus": "vhl standings results match protocols rosters", "region": "ru"},
+        {"site": "championat.com", "label": "Championat", "focus": "hockey news previews analysis standings", "region": "ru"},
+        {"site": "sport-express.ru", "label": "Sport Express", "focus": "hockey previews injuries lineups analysis", "region": "ru"},
         {"site": "eliteprospects.com", "label": "Elite Prospects", "focus": "rosters transfers goals assists"},
-        {"site": "naturalstattrick.com", "label": "Natural Stat Trick", "focus": "corsi fenwick xgf xga"},
-        {"site": "liveresult.ru", "label": "LiveResult", "focus": "khl europe quick results"},
+        {"site": "flashscore.com", "label": "Flashscore", "focus": "live scores h2h standings results"},
+        {"site": "liveresult.ru", "label": "LiveResult", "focus": "khl vhl europe quick results", "region": "ru"},
     ],
     "basketball": [
         {"site": "vtb-league.com", "label": "VTB United League", "focus": "official vtb league efficiency ratings rosters match protocols", "region": "ru"},
@@ -408,10 +426,10 @@ def _fetch_page_excerpt(url: str, entity: str) -> str:
             pattern = re.compile("|".join(re.escape(token) for token in entity_tokens), re.IGNORECASE)
             match = pattern.search(text)
             if match:
-                start = max(0, match.start() - 220)
-                end = min(len(text), match.end() + 420)
+                start = max(0, match.start() - 400)
+                end = min(len(text), match.end() + 800)
                 return text[start:end]
-        return text[:640]
+        return text[:1200]
     except Exception as exc:
         logger.debug("Page fetch failed for %s: %s", url, exc)
         return ""
@@ -885,18 +903,18 @@ def _collect_analysis_sources(
 
 
 _DISCIPLINE_SEARCH_LABEL = {
-    "football": "football soccer",
-    "tennis": "tennis ATP WTA",
-    "table_tennis": "table tennis",
-    "hockey": "hockey NHL KHL",
-    "basketball": "basketball NBA",
-    "volleyball": "volleyball",
-    "mma": "MMA UFC",
-    "boxing": "boxing",
-    "cs2": "CS2 esports",
-    "dota2": "Dota 2 esports",
-    "lol": "League of Legends esports",
-    "valorant": "Valorant esports",
+    "football": "football soccer UEFA EPL La Liga Serie A Bundesliga",
+    "tennis": "tennis ATP WTA ITF",
+    "table_tennis": "table tennis ITTF WTT",
+    "hockey": "hockey KHL VHL MHL NHL SHL",
+    "basketball": "basketball NBA Euroleague VTB",
+    "volleyball": "volleyball CEV SuperLiga",
+    "mma": "MMA UFC Bellator PFL",
+    "boxing": "boxing WBA WBC IBF WBO",
+    "cs2": "CS2 Counter-Strike esports HLTV",
+    "dota2": "Dota 2 esports DPC",
+    "lol": "League of Legends esports LCK LEC LCS",
+    "valorant": "Valorant esports VCT",
 }
 
 
@@ -940,16 +958,16 @@ def collect_validated_sources(
                 "source": source,
                 "search_engine": result.get("search_engine", "unknown"),
                 "title": title,
-                "body": body[:260],
-                "excerpt": excerpt[:640],
+                "body": body[:400],
+                "excerpt": excerpt[:1200],
                 "href": url,
                 "validated": True,
                 "trusted_domain": is_trusted,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             })
 
-    # ── Бюджет запросов на участника: max 2 бесплатных + max 2 AI = max 4 ──
-    MAX_FREE_QUERIES = 2
+    # ── Бюджет запросов на участника: max 3 бесплатных + max 2 AI = max 5 ──
+    MAX_FREE_QUERIES = 3
     MAX_AI_QUERIES = 2
 
     # ── Phase 1: broad search across ALL free engines (free query 1/2) ──
@@ -969,7 +987,7 @@ def collect_validated_sources(
     # ── Phase 2: targeted site: query (free query 2/2) — only if Phase 1 insufficient ──
     if len(validated_sources) < min_sources and free_queries_used < MAX_FREE_QUERIES:
         sites_to_query = _get_sites_for_query(discipline, entity, context_terms)
-        for site in sites_to_query[:1]:
+        for site in sites_to_query[:2]:
             if len(validated_sources) >= min_sources:
                 break
             if free_queries_used >= MAX_FREE_QUERIES:
@@ -989,22 +1007,26 @@ def collect_validated_sources(
     logger.info("Free engines done: %d/%d queries used, %d validated sources for '%s'",
                 free_queries_used, MAX_FREE_QUERIES, len(validated_sources), entity)
 
-    # ── Phase 3: AI search (Exa/Tavily) — fallback, max 2 queries ──
+    # ── Phase 3: AI search (Exa/Tavily) — enrich data if excerpts are thin ──
     analysis_sources: Dict[str, Any] = {"answers": [], "snippets": [], "used_engines": []}
-    if len(validated_sources) < min_sources:
+    total_excerpt_len = sum(len(s.get("excerpt", "")) for s in validated_sources)
+    data_is_thin = total_excerpt_len < 800  # less than ~400 chars per source average
+
+    if len(validated_sources) < min_sources or data_is_thin:
         if EXA_API_KEY or TAVILY_API_KEY:
-            logger.info("Phase 3 — free insufficient (%d/%d), calling AI search (max %d) for '%s'",
-                         len(validated_sources), min_sources, MAX_AI_QUERIES, entity)
+            reason = "insufficient sources" if len(validated_sources) < min_sources else "thin data"
+            logger.info("Phase 3 — %s (%d sources, %d excerpt chars), calling AI search (max %d) for '%s'",
+                         reason, len(validated_sources), total_excerpt_len, MAX_AI_QUERIES, entity)
             analysis_sources = _collect_analysis_sources(
                 entity, discipline, stat_type, context_terms,
                 [e["site"] for e in all_sites],
                 max_queries=MAX_AI_QUERIES,
             )
         else:
-            logger.info("Phase 3 — free insufficient but no AI keys configured")
+            logger.info("Phase 3 — data insufficient but no AI keys configured")
     else:
-        logger.info("Phase 3 — free sufficient (%d/%d), skipping AI search for '%s'",
-                     len(validated_sources), min_sources, entity)
+        logger.info("Phase 3 — data sufficient (%d sources, %d excerpt chars), skipping AI search for '%s'",
+                     len(validated_sources), total_excerpt_len, entity)
 
     # ── Fallback: if still nothing validated, take best-matching raw results ──
     if not validated_sources and unvalidated_results:
@@ -1034,8 +1056,8 @@ def collect_validated_sources(
                 "source": source,
                 "search_engine": result.get("search_engine", "unknown"),
                 "title": title,
-                "body": body[:260],
-                "excerpt": excerpt[:640],
+                "body": body[:400],
+                "excerpt": excerpt[:1200],
                 "href": url,
                 "validated": False,
                 "trusted_domain": is_trusted,
