@@ -1,4 +1,13 @@
-﻿import os
+﻿import pytz
+# --- LOAD ENV ---
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+
+def to_moscow_time(dt: datetime) -> datetime:
+    """Преобразует datetime (UTC или naive) в московское время."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MOSCOW_TZ)
+import os
 import re
 import asyncio
 import logging
@@ -43,7 +52,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
 LLM_FALLBACK_ORDER = ["google", "groq", "sambanova", "deepseek"]
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-1.5")
+GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.0-pro")  # Минимум Gemini 2.0, по умолчанию самая свежая стабильная
 GOOGLE_API_VERSION = os.getenv("GOOGLE_API_VERSION", "v1")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -130,8 +139,12 @@ def get_available_models(page_size: int = 50) -> list[str]:
     try:
         pager = google_client.models.list(config={"page_size": page_size})
         available = [model.name for model in pager]
-        logging.info("Available Google models: %s", available)
-        return available
+        # Фильтруем только модели Gemini >= 2.0 (и самые свежие)
+        filtered = [m for m in available if any(
+            v in m.lower() for v in ["gemini-2", "gemini-3", "gemini-4", "gemini-2.5", "gemini-3.0", "gemini-4.0"]
+        )]
+        logging.info("Available Google models (>=2.0): %s", filtered)
+        return filtered or available
     except Exception as e:
         logging.warning("Unable to list available Google models: %s", e)
         return []
@@ -143,32 +156,22 @@ def choose_google_model(default_model: str) -> str:
         logging.info("No available models returned, using default model: %s", default_model)
         return default_model
 
-    for model in available:
+    # Используем только модели Gemini >= 2.0, сортируем по убыванию версии
+    def model_version_key(m):
+        import re
+        match = re.search(r"gemini-(\d+(?:\.\d+)?)", m.lower())
+        return float(match.group(1)) if match else 0
+
+    sorted_models = sorted([m for m in available if "gemini" in m.lower()], key=model_version_key, reverse=True)
+    # Берём самую свежую
+    for model in sorted_models:
         if model == default_model or model.endswith(f"/{default_model}"):
             logging.info("Using requested model: %s", model)
             return model
-
-    preferred = [
-        default_model,
-        "gemini-2.0-flash-lite-001",
-        "gemini-2.0-flash-lite",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash-001",
-        "gemini-2.0-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-1.5-proto",
-        "gemini-2.0",
-        "gemini-1.0",
-        "text-bison@001",
-    ]
-    for candidate in preferred:
-        for model in available:
-            if model == candidate or model.endswith(f"/{candidate}") or candidate in model:
-                logging.info("Switching to available model: %s", model)
-                return model
-
-    logging.warning("Preferred models not found; using first available model: %s", available[0])
+    if sorted_models:
+        logging.info("Switching to latest available Gemini model: %s", sorted_models[0])
+        return sorted_models[0]
+    logging.warning("No Gemini >=2.0 models found, using first available: %s", available[0])
     return available[0]
 
 
@@ -186,11 +189,12 @@ else:
 
 # --- LLM MODELS TO TRY ---
 GROQ_STABLE_MODELS = [
+    # Только актуальные модели не старше двух поколений
     "llama-3.3-70b-versatile",
-    "mixtral-8x7b-32768",
     "llama-3.1-8b-instant",
     "llama3-70b-8192",
     "llama3-8b-8192",
+    # Можно добавить новые модели здесь по мере появления
 ]
 
 
@@ -896,7 +900,13 @@ def resolve_match_validation(team1: str, team2: str, date_text: str, discipline:
     match_text = f"{team1} vs {team2}"
     validation = validate_match_request(match_text, date_text, discipline_key or discipline)
     if validation.get("status") == "validated" and validation.get("match"):
-        return validation["match"], validation.get("report", ""), True
+        # Новый блок: прокидываем регион из валидации
+        region = validation.get("region")
+        match_payload = validation.get("match")
+        if match_payload and region:
+            match_payload["region"] = region
+        if validation.get("status") == "validated" and match_payload:
+            return match_payload, validation.get("report", ""), True
 
     # Fallback: TheSportsDB API
     from services.external_source import search_event_thesportsdb
@@ -1388,10 +1398,20 @@ async def start_analysis(message: types.Message, state: FSMContext):
             "analysis_started",
             {"discipline": discipline, "match": analysis_match, "date": match_context.get("date")},
         )
+        # Форматируем дату в московском времени, если возможно
+        date_str = match_context.get('date')
+        moscow_date_str = ""
+        if date_str:
+            try:
+                dt = datetime.fromisoformat(date_str)
+                moscow_dt = to_moscow_time(dt)
+                moscow_date_str = moscow_dt.strftime('%Y-%m-%d %H:%M (МСК)')
+            except Exception:
+                moscow_date_str = date_str
         context_block = "\n".join(
             line for line in [
                 f"Подтвержденный матч: {analysis_match}" if analysis_match else "",
-                f"Дата матча: {match_context['date']}" if match_context.get('date') else "",
+                f"Дата матча: {moscow_date_str}" if moscow_date_str else "",
                 f"Лига/турнир: {match_context['league']}" if match_context.get('league') else "",
                 data.get('match_validation_report', ''),
             ] if line

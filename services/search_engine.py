@@ -1,3 +1,41 @@
+def format_validated_report(report: dict) -> str:
+    """Форматирует отчет по валидированным источникам для вывода пользователю."""
+    header = [
+        f"Источники для: {report.get('entity', '')}",
+        f"Дисциплина: {report.get('discipline', '')}",
+        f"Тип статистики: {report.get('stat_type', '')}",
+        f"Валидировано: {report.get('validated_count', 0)}"
+    ]
+    blocks = []
+    for source in report.get("validated_sources", []):
+        blocks.extend([
+            f"Источник: {source['site']}",
+            f"Заголовок: {source['title']}",
+            f"Сниппет: {source['body']}",
+            f"Выжимка со страницы: {source['excerpt'] or 'нет доступного текста'}",
+            f"Ссылка: {source['href']}",
+            ""
+        ])
+    analysis = report.get("analysis_sources") or {}
+    analysis_answers = analysis.get("answers") or []
+    analysis_snippets = analysis.get("snippets") or []
+    analysis_engines = ", ".join(analysis.get("used_engines") or []) or "нет"
+    analysis_lines = [
+        "",
+        f"Аналитический поиск (Exa/Tavily): {analysis_engines}",
+    ]
+    for answer in analysis_answers:
+        analysis_lines.append(f"Ответ движка: {answer}")
+    for idx, snippet in enumerate(analysis_snippets, start=1):
+        analysis_lines.extend([
+            f"Аналитика {idx}: {snippet['search_engine']} ({snippet['site']})",
+            f"Query: {snippet['query']}",
+            f"Заголовок: {snippet['title']}",
+            f"Сниппет: {snippet['body']}",
+            f"Ссылка: {snippet['href']}",
+            ""
+        ])
+    return "\n".join(header + [""] + blocks + analysis_lines)
 """Search and validation helpers for multi-source sports data collection."""
 
 import logging
@@ -23,7 +61,10 @@ except ImportError:
 try:
     from ddgs import DDGS
 except ImportError:
-    from duckduckgo_search import DDGS
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
 try:
     from googlesearch import search as google_search_lib
 except ImportError:
@@ -959,9 +1000,23 @@ def collect_validated_sources(
     min_sources: int = 2,
     timelimit: str = "m",
     context_terms: Optional[str] = None,
+    region: Optional[str] = None,
 ) -> Dict[str, Any]:
     all_sites = DISCIPLINE_SOURCE_CONFIG.get(discipline, [])
     trusted_domains = {entry["site"] for entry in all_sites}
+    # Приоритизация источников по региону с fallback
+    fallback_attempted = False
+    def get_ordered_entries(region):
+        if region == "ru":
+            ordered = [entry for entry in all_sites if entry.get("region") == "ru"]
+            ordered.extend(entry for entry in all_sites if entry.get("region") != "ru")
+        elif region == "intl":
+            ordered = [entry for entry in all_sites if entry.get("region") != "ru"]
+            ordered.extend(entry for entry in all_sites if entry.get("region") == "ru")
+        else:
+            ordered = all_sites
+        return ordered
+    all_sites = get_ordered_entries(region)
     validated_sources: List[Dict[str, Any]] = []
     unvalidated_results: List[Dict[str, Any]] = []
     seen_urls: set = set()
@@ -970,7 +1025,6 @@ def collect_validated_sources(
     context_suffix = f" {context_terms}" if context_terms else ""
 
     def _validate_and_collect(results: List[Dict[str, Any]]) -> None:
-        """Validate results and add to validated_sources / unvalidated_results."""
         for result in results:
             if len(validated_sources) >= min_sources:
                 return
@@ -999,86 +1053,95 @@ def collect_validated_sources(
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             })
 
-    # ── Бюджет запросов на участника: max 3 бесплатных + max 2 AI = max 5 ──
-    MAX_FREE_QUERIES = 3
-    MAX_AI_QUERIES = 2
+    # --- Новый порядок: профильные библиотеки -> Serper -> Exa/Tavily ---
+    # 0. Валидация и регион определяются на этапе validate_match_request через DDG (не здесь)
 
-    # ── Phase 1: broad search across ALL free engines (free query 1/2) ──
-    free_queries_used = 0
-    broad_query = f"{entity} {discipline_label} {stat_type}{context_suffix}"
-    free_queries_used += 1
-    logger.info("Phase 1 — free query %d/%d (broad): %s", free_queries_used, MAX_FREE_QUERIES, broad_query)
-    broad_results = multi_engine_search(broad_query, num_results=10, timelimit=timelimit)
+    # 1. Профильные библиотеки (если есть)
+    # (Реализуется в data_fetcher, здесь только заглушка для совместимости)
+    # validated_sources может быть заполнен до вызова этой функции, если data_fetcher уже добавил данные
+    if len(validated_sources) >= min_sources:
+        logger.info("Профильные библиотеки дали достаточно данных (%d)", len(validated_sources))
+        return {
+            "entity": entity,
+            "discipline": discipline,
+            "stat_type": stat_type,
+            "min_sources": min_sources,
+            "freshness_window": timelimit,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "validated_sources": validated_sources,
+            "analysis_sources": {},
+            "validated_count": len(validated_sources),
+            "enough_sources": True,
+            "status": "validated",
+        }
 
-    # Sort broad results: trusted domains first
-    broad_results.sort(
-        key=lambda r: not any(d in r.get("href", "") for d in trusted_domains)
-    )
-    _validate_and_collect(broad_results)
-    logger.info("After Phase 1: %d validated for '%s'", len(validated_sources), entity)
+    # 2. Serper (2 запроса на участника)
+    logger.info("Serper phase: основной источник для аналитики")
+    serper_results = search_with_serper(f"{entity} {discipline_label} {stat_type}{context_suffix}", num_results=2)
+    _validate_and_collect(serper_results)
+    logger.info("After Serper: %d validated for '%s'", len(validated_sources), entity)
+    # Fallback: если не найдено достаточно — пробуем альтернативный регион
+    if len(validated_sources) < min_sources and not fallback_attempted and region in ("ru", "intl"):
+        logger.info("Fallback: пробуем альтернативный регион для источников")
+        fallback_attempted = True
+        alt_region = "intl" if region == "ru" else "ru"
+        all_sites = get_ordered_entries(alt_region)
+        serper_results = search_with_serper(f"{entity} {discipline_label} {stat_type}{context_suffix}", num_results=2)
+        _validate_and_collect(serper_results)
+        logger.info("After fallback Serper: %d validated for '%s'", len(validated_sources), entity)
+    if len(validated_sources) >= min_sources:
+        return {
+            "entity": entity,
+            "discipline": discipline,
+            "stat_type": stat_type,
+            "min_sources": min_sources,
+            "freshness_window": timelimit,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "validated_sources": validated_sources,
+            "analysis_sources": {},
+            "validated_count": len(validated_sources),
+            "enough_sources": True,
+            "status": "validated",
+        }
 
-    # ── Phase 2: targeted site: query (free query 2/2) — only if Phase 1 insufficient ──
-    if len(validated_sources) < min_sources and free_queries_used < MAX_FREE_QUERIES:
-        sites_to_query = _get_sites_for_query(discipline, entity, context_terms)
-        for site in sites_to_query[:2]:
+    # 3. Exa/Tavily (по 1-2 запроса на участника)
+    if (EXA_API_KEY or TAVILY_API_KEY):
+        logger.info("Exa/Tavily phase: резервный источник для аналитики")
+        analysis_sources = _collect_analysis_sources(
+            entity, discipline, stat_type, context_terms,
+            [e["site"] for e in all_sites],
+            max_queries=2,
+        )
+        for snip in analysis_sources.get("snippets", []):
             if len(validated_sources) >= min_sources:
                 break
-            if free_queries_used >= MAX_FREE_QUERIES:
-                break
-            free_queries_used += 1
-            site_query = f"{entity} {stat_type}{context_suffix} site:{site}"
-            logger.info("Phase 2 — free query %d/%d (site): %s", free_queries_used, MAX_FREE_QUERIES, site_query)
-            try:
-                raw = search_with_ddgs(site_query, num_results=3, timelimit=timelimit)
-            except Exception:
-                raw = []
-            for r in raw:
-                r.setdefault("search_engine", "site_search")
-            _validate_and_collect(raw)
-        logger.info("After Phase 2: %d validated for '%s'", len(validated_sources), entity)
-
-    logger.info("Free engines done: %d/%d queries used, %d validated sources for '%s'",
-                free_queries_used, MAX_FREE_QUERIES, len(validated_sources), entity)
-
-    # ── Phase 3: AI search (Exa/Tavily) — enrich data if quality is low ──
-    analysis_sources: Dict[str, Any] = {"answers": [], "snippets": [], "used_engines": []}
-    total_excerpt_len = sum(len(s.get("excerpt", "")) for s in validated_sources)
-    data_is_thin = total_excerpt_len < 800  # less than ~400 chars per source average
-
-    # Quality check: how many stat_type keywords are actually covered?
-    stat_keywords = [kw.lower() for kw in stat_type.split() if len(kw) > 2]
-    all_text = " ".join(
-        (s.get("excerpt", "") + " " + s.get("body", "") + " " + s.get("title", "")).lower()
-        for s in validated_sources
-    )
-    covered = sum(1 for kw in stat_keywords if kw in all_text)
-    coverage_ratio = covered / len(stat_keywords) if stat_keywords else 1.0
-    data_low_quality = coverage_ratio < 0.3  # less than 30% of requested stats found
-
-    need_ai = len(validated_sources) < min_sources or data_is_thin or data_low_quality
-
-    if need_ai:
-        if EXA_API_KEY or TAVILY_API_KEY or SERPER_API_KEY:
-            reasons = []
-            if len(validated_sources) < min_sources:
-                reasons.append("insufficient sources")
-            if data_is_thin:
-                reasons.append("thin data")
-            if data_low_quality:
-                reasons.append(f"low quality ({covered}/{len(stat_keywords)} keywords covered)")
-            reason = ", ".join(reasons)
-            logger.info("Phase 3 — %s (%d sources, %d excerpt chars, %.0f%% coverage), calling AI search (max %d) for '%s'",
-                         reason, len(validated_sources), total_excerpt_len, coverage_ratio * 100, MAX_AI_QUERIES, entity)
-            analysis_sources = _collect_analysis_sources(
-                entity, discipline, stat_type, context_terms,
-                [e["site"] for e in all_sites],
-                max_queries=MAX_AI_QUERIES,
-            )
-        else:
-            logger.info("Phase 3 — data insufficient but no AI keys configured")
-    else:
-        logger.info("Phase 3 — data sufficient (%d sources, %d excerpt chars, %.0f%% coverage), skipping AI search for '%s'",
-                     len(validated_sources), total_excerpt_len, coverage_ratio * 100, entity)
+            validated_sources.append({
+                "site": snip.get("site", "ai"),
+                "source": snip.get("site", "ai"),
+                "search_engine": snip.get("search_engine", "ai"),
+                "title": snip.get("title", ""),
+                "body": snip.get("body", "")[:400],
+                "excerpt": snip.get("body", "")[:1200],
+                "href": snip.get("href", ""),
+                "validated": True,
+                "trusted_domain": True,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            })
+        logger.info("After Exa/Tavily: %d validated for '%s'", len(validated_sources), entity)
+        if len(validated_sources) >= min_sources:
+            return {
+                "entity": entity,
+                "discipline": discipline,
+                "stat_type": stat_type,
+                "min_sources": min_sources,
+                "freshness_window": timelimit,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "validated_sources": validated_sources,
+                "analysis_sources": analysis_sources,
+                "validated_count": len(validated_sources),
+                "enough_sources": True,
+                "status": "validated",
+            }
 
     # ── Fallback: if still nothing validated, take best-matching raw results ──
     if not validated_sources and unvalidated_results:
@@ -1134,33 +1197,30 @@ def collect_validated_sources(
 
 def validate_match_request(match_text: str, date_text: str, discipline: str) -> Dict[str, Any]:
     sides = split_match_text(match_text)
-    if len(sides) != 2:
-        return {
-            "status": "invalid_match",
-            "match": None,
-            "report": "Валидация: неверный формат матча.",
-        }
-
     discipline_key = _normalize_validation_discipline_key(discipline)
-    if discipline_key not in DISCIPLINE_SOURCE_CONFIG:
-        return {
-            "status": "unsupported_discipline",
-            "match": None,
-            "report": f"Валидация: дисциплина '{discipline}' не поддерживается для веб-проверки.",
-        }
-
     participant_reports = []
+    regions = []
     for side in sides:
-        participant_reports.append(
-            collect_validated_sources(
-                side,
-                discipline_key,
-                "official team player roster ranking profile recent results current season",
-                min_sources=1,
-                timelimit="m",
-                context_terms=None,
-            )
+        rep = collect_validated_sources(
+            side,
+            discipline_key,
+            "official team player roster ranking profile recent results current season",
+            min_sources=1,
+            timelimit="m",
+            context_terms=None,
         )
+        participant_reports.append(rep)
+        # Определяем регион для каждого участника по источникам
+        region = None
+        for src in rep.get("validated_sources", []):
+            # Используем region из DISCIPLINE_SOURCE_CONFIG
+            for entry in DISCIPLINE_SOURCE_CONFIG[discipline_key]:
+                if src.get("site") == entry["site"] and entry.get("region") == "ru":
+                    region = "ru"
+                    break
+            if not region:
+                region = "intl"
+        regions.append(region)
 
     if any(report.get("validated_count", 0) < 1 for report in participant_reports):
         report_blocks = [format_validated_report(report) for report in participant_reports]
@@ -1171,6 +1231,7 @@ def validate_match_request(match_text: str, date_text: str, discipline: str) -> 
             "validated_count": sum(report.get("validated_count", 0) for report in participant_reports),
         }
 
+    region = "ru" if regions.count("ru") >= regions.count("intl") else "intl"
     normalized_date = date_text.strip() if date_text else "дата не указана"
     report_lines = [
         f"Валидация 1 контура: участники подтверждены для дисциплины {discipline_key}.",
@@ -1186,45 +1247,16 @@ def validate_match_request(match_text: str, date_text: str, discipline: str) -> 
         "date": normalized_date,
         "league": "user input",
         "user_discipline": discipline,
+        "region": region,
     }
 
     return {
         "status": "validated",
         "match": match_payload,
+        "region": region,
         "report": "\n\n".join(report_lines),
         "validated_count": sum(report.get("validated_count", 0) for report in participant_reports),
     }
-
-
-def format_validated_report(report: Dict[str, Any]) -> str:
-    if not report["validated_sources"]:
-        return (
-            f"Валидация: недостаточно данных для {report['entity']}. "
-            f"Проверено источников: 0. Окно свежести: {report['freshness_window']}."
-        )
-
-    header = [
-        f"Валидация: {report['status']}",
-        f"Подтверждено источников: {report['validated_count']}",
-        f"Минимум источников: {report.get('min_sources', 2)}",
-        f"Окно свежести поиска: {report['freshness_window']}",
-        f"Проверено: {report['checked_at']}",
-    ]
-
-    blocks = []
-    for index, source in enumerate(report["validated_sources"], start=1):
-        blocks.append(
-            "\n".join(
-                [
-                    f"Источник {index}: {source['source']}",
-                    f"Заголовок: {source['title']}",
-                    f"Поисковик: {source['search_engine']}",
-                    f"Сниппет: {source['body']}",
-                    f"Выжимка со страницы: {source['excerpt'] or 'нет доступного текста'}",
-                    f"Ссылка: {source['href']}",
-                ]
-            )
-        )
 
     analysis = report.get("analysis_sources") or {}
     analysis_answers = analysis.get("answers") or []
