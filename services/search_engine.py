@@ -49,6 +49,7 @@ SEARCH_ENABLE_BROAD_WINDOW = os.getenv("SEARCH_ENABLE_BROAD_WINDOW", "false").st
 SEARCH_REGION = os.getenv("SEARCH_REGION", "wt-wt")
 EXA_API_KEY = os.getenv("EXA_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 SEARCH_ANALYSIS_PROVIDER = os.getenv("SEARCH_ANALYSIS_PROVIDER", "hybrid").strip().lower()
 SEARCH_ANALYSIS_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_ANALYSIS_RESULTS_PER_QUERY", "2")))
 SEARCH_ANALYSIS_MAX_SNIPPETS = max(1, int(os.getenv("SEARCH_ANALYSIS_MAX_SNIPPETS", "4")))
@@ -644,12 +645,49 @@ def search_with_yandex(query: str, num_results: int = 5) -> List[Dict[str, Any]]
         return []
 
 
+def search_with_serper(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+    """Google search via Serper.dev API (structured JSON, no scraping needed)."""
+    if not SERPER_API_KEY:
+        return []
+    try:
+        response = requests.post(
+            "https://google.serper.dev/search",
+            headers={
+                "X-API-KEY": SERPER_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={"q": query, "num": num_results},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        results: List[Dict[str, Any]] = []
+        for item in data.get("organic", []):
+            url = item.get("link", "")
+            if not url:
+                continue
+            results.append({
+                "title": item.get("title", ""),
+                "body": item.get("snippet", "")[:400],
+                "href": url,
+                "search_engine": "serper",
+            })
+            if len(results) >= num_results:
+                break
+        logger.info("Serper: %d results for: %s", len(results), query)
+        return results
+    except Exception as exc:
+        logger.debug("Serper search failed for '%s': %s", query, exc)
+        return []
+
+
 # ── Multi-engine search: query ALL engines, merge results ──
 # DDG is primary, others are reserve fallbacks.
 # Google requires ENABLE_GOOGLE_SEARCH=true in env.
 # Bing/Yahoo/Yandex scrapers may need selector updates over time.
 SEARCH_ENGINE_ORDER = [
     ("ddg", search_with_ddgs),
+    ("serper", search_with_serper),
     ("bing", search_with_bing),
     ("yahoo", search_with_yahoo),
     ("yandex", search_with_yandex),
@@ -1007,16 +1045,35 @@ def collect_validated_sources(
     logger.info("Free engines done: %d/%d queries used, %d validated sources for '%s'",
                 free_queries_used, MAX_FREE_QUERIES, len(validated_sources), entity)
 
-    # ── Phase 3: AI search (Exa/Tavily) — enrich data if excerpts are thin ──
+    # ── Phase 3: AI search (Exa/Tavily) — enrich data if quality is low ──
     analysis_sources: Dict[str, Any] = {"answers": [], "snippets": [], "used_engines": []}
     total_excerpt_len = sum(len(s.get("excerpt", "")) for s in validated_sources)
     data_is_thin = total_excerpt_len < 800  # less than ~400 chars per source average
 
-    if len(validated_sources) < min_sources or data_is_thin:
-        if EXA_API_KEY or TAVILY_API_KEY:
-            reason = "insufficient sources" if len(validated_sources) < min_sources else "thin data"
-            logger.info("Phase 3 — %s (%d sources, %d excerpt chars), calling AI search (max %d) for '%s'",
-                         reason, len(validated_sources), total_excerpt_len, MAX_AI_QUERIES, entity)
+    # Quality check: how many stat_type keywords are actually covered?
+    stat_keywords = [kw.lower() for kw in stat_type.split() if len(kw) > 2]
+    all_text = " ".join(
+        (s.get("excerpt", "") + " " + s.get("body", "") + " " + s.get("title", "")).lower()
+        for s in validated_sources
+    )
+    covered = sum(1 for kw in stat_keywords if kw in all_text)
+    coverage_ratio = covered / len(stat_keywords) if stat_keywords else 1.0
+    data_low_quality = coverage_ratio < 0.3  # less than 30% of requested stats found
+
+    need_ai = len(validated_sources) < min_sources or data_is_thin or data_low_quality
+
+    if need_ai:
+        if EXA_API_KEY or TAVILY_API_KEY or SERPER_API_KEY:
+            reasons = []
+            if len(validated_sources) < min_sources:
+                reasons.append("insufficient sources")
+            if data_is_thin:
+                reasons.append("thin data")
+            if data_low_quality:
+                reasons.append(f"low quality ({covered}/{len(stat_keywords)} keywords covered)")
+            reason = ", ".join(reasons)
+            logger.info("Phase 3 — %s (%d sources, %d excerpt chars, %.0f%% coverage), calling AI search (max %d) for '%s'",
+                         reason, len(validated_sources), total_excerpt_len, coverage_ratio * 100, MAX_AI_QUERIES, entity)
             analysis_sources = _collect_analysis_sources(
                 entity, discipline, stat_type, context_terms,
                 [e["site"] for e in all_sites],
@@ -1025,8 +1082,8 @@ def collect_validated_sources(
         else:
             logger.info("Phase 3 — data insufficient but no AI keys configured")
     else:
-        logger.info("Phase 3 — data sufficient (%d sources, %d excerpt chars), skipping AI search for '%s'",
-                     len(validated_sources), total_excerpt_len, entity)
+        logger.info("Phase 3 — data sufficient (%d sources, %d excerpt chars, %.0f%% coverage), skipping AI search for '%s'",
+                     len(validated_sources), total_excerpt_len, coverage_ratio * 100, entity)
 
     # ── Fallback: if still nothing validated, take best-matching raw results ──
     if not validated_sources and unvalidated_results:
