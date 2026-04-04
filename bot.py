@@ -66,7 +66,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.0-pro")  # Минимум Gemini 2.0, по умолчанию самая свежая стабильная
 GOOGLE_API_VERSION = os.getenv("GOOGLE_API_VERSION", "v1")
 
-GROQ_API_KEY = "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"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "compound-beta-mini")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com")
 
