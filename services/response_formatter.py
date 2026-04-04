@@ -48,21 +48,37 @@ def format_response_contract(match_text: str, raw_analysis: str, prediction_stru
     cleaned_analysis = re.sub(r'(?i)\{\s*"win_probability_team1".*?\}', '', cleaned_analysis, flags=re.DOTALL).strip()
     cleaned_analysis = re.sub(r'(?i)\{\s*"winner".*?\}', '', cleaned_analysis, flags=re.DOTALL).strip()
 
+    # --- Новый блок вероятностей и победителя ---
     prob = prediction_struct.get("probability")
     stake = prediction_struct.get("stake_percent")
-    
+    # Попытка получить вероятности обеих команд
+    prob1 = None
+    prob2 = None
+    # Если prediction_struct содержит обе вероятности (например, win_probability_team1, win_probability_team2)
+    prob1 = prediction_struct.get("win_probability_team1")
+    prob2 = prediction_struct.get("win_probability_team2")
+    # Если только одна вероятность (старый формат)
+    if prob1 is None and prob is not None:
+        prob1 = prob
+    if prob2 is None and prob1 is not None:
+        prob2 = 100 - prob1
+    # Корректируем, если обе заданы и не дают 100
+    if prob1 is not None and prob2 is not None:
+        s = prob1 + prob2
+        if abs(s - 100) > 0.1 and s > 0:
+            prob1 = round(prob1 * 100 / s, 1)
+            prob2 = round(prob2 * 100 / s, 1)
+
     winner = _extract_contract_field(cleaned_analysis, [r"Победитель:\s*(.+)", r"Исход:\s*(.+)", r"Прогноз победителя:\s*(.+)"])
     score = _extract_contract_field(cleaned_analysis, [r"Прогноз по счету:\s*(.+)", r"Прогноз по сч[её]ту / картам / сетам:\s*(.+)", r"Сч[её]т:\s*(.+)"])
     total = _extract_contract_field(cleaned_analysis, [r"Тотал:\s*(.+)", r"Total:\s*(.+)", r"Тотал карт:\s*(.+)", r"Total maps:\s*(.+)"])
 
-    # Extract per-participant summaries from LLM output (1-2 sentences each)
     sides = split_match_text(match_text)
     side1_summary = ""
     side2_summary = ""
     if len(sides) == 2:
         for side_idx, (side, _target) in enumerate([(sides[0], "side1_summary"), (sides[1], "side2_summary")]):
             escaped = re.escape(side)
-            # Сначала привязка к началу строки / буллету — иначе цеплялось «колорадо» внутри чужого абзаца и дата
             patterns = [
                 rf"(?m)(?:^|\n)\s*[•\-]\s*\*{{0,2}}\[?{escaped}\]?\*{{0,2}}\s*[:：]\s*(.+?)(?=\n\s*[•\-📈🏆📊📋💰🔢📅]|\n\n|\Z)",
                 rf"(?m)(?:^|\n)\s*\*{{0,2}}\[?{escaped}\]?\*{{0,2}}\s*[:：]\s*(.+?)(?=\n\s*[•\-📈🏆📊📋💰🔢📅]|\n\n|\Z)",
@@ -83,9 +99,7 @@ def format_response_contract(match_text: str, raw_analysis: str, prediction_stru
                         side2_summary = text
                     break
 
-    prob_text = f"{prob:.0f}%" if prob is not None else "не определена"
     stake_text = str(stake) if stake is not None else "ПРОПУСК"
-    
     lines = [f"📊 **Матч:** {match_text}", ""]
     if total:
         lines.append(f"🎯 **Тотал:** {total}")
@@ -95,14 +109,30 @@ def format_response_contract(match_text: str, raw_analysis: str, prediction_stru
         lines.append(f"• **{sides[1]}:** {side2_summary}")
     if side1_summary or side2_summary:
         lines.append("")
+
+    # --- Вероятности обеих команд ---
+    if len(sides) == 2 and prob1 is not None and prob2 is not None:
+        lines.append(f"📈 **Вероятность:** [{sides[0]}] — {prob1:.1f}% | [{sides[1]}] — {prob2:.1f}%")
+    elif prob1 is not None:
+        lines.append(f"📈 **Вероятность:** {prob1:.1f}%")
+    else:
+        lines.append(f"📈 **Вероятность:** не определена")
+
+    # --- Победитель с уверенностью ---
+    winner_prob = None
+    if winner and len(sides) == 2:
+        # Определяем, какая команда победитель, и берем её вероятность
+        if winner.strip().lower() == sides[0].strip().lower():
+            winner_prob = prob1
+        elif winner.strip().lower() == sides[1].strip().lower():
+            winner_prob = prob2
+    lines.append(f"🏆 **Победитель:** {winner or '?'}" + (f" (Уверенность: {winner_prob:.1f}%)" if winner_prob is not None else ""))
+
     lines += [
-        f"🏆 **Победитель:** {winner or '?'}",
-        f"📈 **Вероятность (1-й команды):** {prob_text}",
         f"🔢 **Счёт:** {score or '?'}",
         f"💰 **Ставка:** {stake_text}",
         f"💡 {prediction_struct.get('recommendation', '')}",
     ]
-    
     return "\n".join(lines)
 
 

@@ -49,36 +49,36 @@ def extract_betting_data(llm_response: str) -> dict:
     """
     probability = None
     odds = None
-    
+    prob_t1 = None
+    prob_t2 = None
     # Try finding JSON block
     match = re.search(r'```json\s*(\{.*?\})\s*```', llm_response, re.DOTALL | re.IGNORECASE)
     if not match:
         match = re.search(r'(\{.*?\})', llm_response, re.DOTALL)
-        
     if match:
         try:
-            # Clean up the string in case there's garbage
             json_str = match.group(1).strip()
             data = json.loads(json_str)
-            
-            # 1. Try new forced JSON format
+            # Новые поля для обеих команд
             prob_t1 = data.get("win_probability_team1")
+            prob_t2 = data.get("win_probability_team2")
             if prob_t1 is not None:
-                probability = float(prob_t1)
-            
-            # 2. Try old/generic JSON fields
-            if probability is None:
+                prob_t1 = float(prob_t1)
+            if prob_t2 is not None:
+                prob_t2 = float(prob_t2)
+            # Старый формат
+            if prob_t1 is None:
                 prob_val = data.get("probability")
                 if prob_val is not None:
-                    probability = float(prob_val)
-            
+                    prob_t1 = float(prob_val)
+            # Если только одна вероятность, вторая считается автоматически в response_formatter
             odds_val = data.get("odds")
             if odds_val is not None:
                 odds = float(odds_val)
-                
-            # Store additional fields if needed for future use
             return {
-                "probability": probability,
+                "probability": prob_t1,
+                "win_probability_team1": prob_t1,
+                "win_probability_team2": prob_t2,
                 "odds": odds,
                 "draw_probability": data.get("draw_probability"),
                 "recommended_bet_size": data.get("recommended_bet_size"),
@@ -87,12 +87,10 @@ def extract_betting_data(llm_response: str) -> dict:
             }
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
-            
     # Fallback to regex for probability
-    if probability is None:
-        probability = extract_probability(llm_response)
-        
-    return {"probability": probability, "odds": odds}
+    if prob_t1 is None:
+        prob_t1 = extract_probability(llm_response)
+    return {"probability": prob_t1, "win_probability_team1": prob_t1, "win_probability_team2": prob_t2, "odds": odds}
 
 
 def calculate_value_bet(probability: float, odds: float | None = None) -> dict:
