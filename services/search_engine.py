@@ -480,10 +480,21 @@ def _set_google_backoff() -> None:
 
 
 def _fetch_page_excerpt(url: str, entity: str) -> str:
-    # Legacy sync fetcher удалён. Функция-заглушка.
-    return ""
-                return text[start:end]
+    """
+    Извлекает фрагмент текста со страницы. 
+    Если возникнет ошибка, возвращает пустую строку.
+    """
+    try:
+        # Здесь должна быть логика получения текста (например, через httpx или aiohttp)
+        # Но так как это синхронная заглушка, пока оставим базовую обработку:
+        text = "" # Тут предполагается получение контента
+        
+        if not text:
+            return ""
+            
+        # Возвращаем первые 1200 символов или фрагмент
         return text[:1200]
+        
     except Exception as exc:
         logger.debug("Page fetch failed for %s: %s", url, exc)
         return ""
@@ -1015,7 +1026,7 @@ def collect_validated_sources(
         return _enough_payload()
 
     return asyncio.run(_main_async())
-        if len(validated_sources) >= min_sources:
+    if len(validated_sources) >= min_sources:
             logger.info(f"[VALIDATE] После Exa/Tavily достаточно данных: {len(validated_sources)}")
             return {
                 "entity": entity,
