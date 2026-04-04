@@ -1,11 +1,4 @@
-﻿def to_moscow_time(dt: 'datetime') -> 'datetime':
-    """Преобразует datetime (UTC или naive) в московское время."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(MOSCOW_TZ)
-
-
-import pytz
+﻿import pytz
 from datetime import datetime, timedelta, timezone
 import os
 import datetime as datetime_module
@@ -254,17 +247,18 @@ async def generate_with_google(contents: str, discipline: str = "киберсп�
                 model for model in available
                 if model != SELECTED_GOOGLE_MODEL and ("flash-lite" in model or "lite" in model)
             ]
+
+            def _sync_google_generate(model_name: str):
+                return google_client.models.generate_content(
+                    model=model_name,
+                    contents=request_contents,
+                )
+
             for model in fallback:
                 try:
                     logging.warning("Trying fallback model %s after quota error", model)
                     loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: google_client.models.generate_content(
-                            model=model,
-                            contents=request_contents,
-                        )
-                    )
+                    response = await loop.run_in_executor(None, _sync_google_generate, model)
                     return response.text
                 except Exception as e2:
                     logging.warning("Fallback model %s failed: %s", model, e2)
@@ -866,9 +860,8 @@ async def set_subdiscipline(message: types.Message, state: FSMContext):
         await message.answer("Пожалуйста, выберите из предложенных вариантов")
 
 def get_date_keyboard() -> types.InlineKeyboardMarkup:
-    """Создает клавиатуру с датами на 7 дней от сегодня (MSK, UTC+3)"""
-    msk = timezone(timedelta(hours=3))
-    today = datetime.now(tz=msk)
+    """Создает клавиатуру с датами на 7 дней от сегодня (Europe/Moscow, как to_moscow_time)."""
+    today = datetime.now(tz=MOSCOW_TZ)
     
     kb = []
     for i in range(7):

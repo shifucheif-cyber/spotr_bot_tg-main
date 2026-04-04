@@ -1,43 +1,11 @@
-def format_validated_report(report: dict) -> str:
-    """Форматирует отчет по валидированным источникам для вывода пользователю."""
-    header = [
-        f"Источники для: {report.get('entity', '')}",
-        f"Дисциплина: {report.get('discipline', '')}",
-        f"Тип статистики: {report.get('stat_type', '')}",
-        f"Валидировано: {report.get('validated_count', 0)}"
-    ]
-    blocks = []
-    for source in report.get("validated_sources", []):
-        blocks.extend([
-            f"Источник: {source['site']}",
-            f"Заголовок: {source['title']}",
-            f"Сниппет: {source['body']}",
-            f"Выжимка со страницы: {source['excerpt'] or 'нет доступного текста'}",
-            f"Ссылка: {source['href']}",
-            ""
-        ])
-    analysis = report.get("analysis_sources") or {}
-    analysis_answers = analysis.get("answers") or []
-    analysis_snippets = analysis.get("snippets") or []
-    analysis_engines = ", ".join(analysis.get("used_engines") or []) or "нет"
-    analysis_lines = [
-        "",
-        f"Аналитический поиск (Exa/Tavily): {analysis_engines}",
-    ]
-    for answer in analysis_answers:
-        analysis_lines.append(f"Ответ движка: {answer}")
-    for idx, snippet in enumerate(analysis_snippets, start=1):
-        analysis_lines.extend([
-            f"Аналитика {idx}: {snippet['search_engine']} ({snippet['site']})",
-            f"Query: {snippet['query']}",
-            f"Заголовок: {snippet['title']}",
-            f"Сниппет: {snippet['body']}",
-            f"Ссылка: {snippet['href']}",
-            ""
-        ])
-    return "\n".join(header + [""] + blocks + analysis_lines)
-"""Search and validation helpers for multi-source sports data collection."""
+"""Search and validation helpers for multi-source sports data collection.
 
+Пайплайн данных (согласован с логикой бота):
+1) DuckDuckGo — первичная проверка сущности/события в открытом вебе.
+2) Профильные источники — в data_fetcher (HLTV, WhoScored и т.д.) до/параллельно отчётам collect_validated_sources.
+3) Serper — недостающий контекст: новости, составы, травмы, форма, усталость/график.
+4) Exa / Tavily — только если после Serper всё ещё мало валидных источников.
+"""
 
 import logging
 import os
@@ -81,6 +49,47 @@ logger.info(f"[KEYS] EXA_API_KEY={'SET' if EXA_API_KEY else 'MISSING'}")
 logger.info(f"[KEYS] TAVILY_API_KEY={'SET' if TAVILY_API_KEY else 'MISSING'}")
 logger.info(f"[KEYS] SERPER_API_KEY={'SET' if SERPER_API_KEY else 'MISSING'}")
 
+
+def format_validated_report(report: dict) -> str:
+    """Форматирует отчет по валидированным источникам для вывода пользователю."""
+    header = [
+        f"Источники для: {report.get('entity', '')}",
+        f"Дисциплина: {report.get('discipline', '')}",
+        f"Тип статистики: {report.get('stat_type', '')}",
+        f"Валидировано: {report.get('validated_count', 0)}",
+    ]
+    blocks = []
+    for source in report.get("validated_sources", []):
+        blocks.extend([
+            f"Источник: {source['site']}",
+            f"Заголовок: {source['title']}",
+            f"Сниппет: {source['body']}",
+            f"Выжимка со страницы: {source['excerpt'] or 'нет доступного текста'}",
+            f"Ссылка: {source['href']}",
+            "",
+        ])
+    analysis = report.get("analysis_sources") or {}
+    analysis_answers = analysis.get("answers") or []
+    analysis_snippets = analysis.get("snippets") or []
+    analysis_engines = ", ".join(analysis.get("used_engines") or []) or "нет"
+    analysis_lines = [
+        "",
+        f"Аналитический поиск (Exa/Tavily): {analysis_engines}",
+    ]
+    for answer in analysis_answers:
+        analysis_lines.append(f"Ответ движка: {answer}")
+    for idx, snippet in enumerate(analysis_snippets, start=1):
+        analysis_lines.extend([
+            f"Аналитика {idx}: {snippet['search_engine']} ({snippet['site']})",
+            f"Query: {snippet['query']}",
+            f"Заголовок: {snippet['title']}",
+            f"Сниппет: {snippet['body']}",
+            f"Ссылка: {snippet['href']}",
+            "",
+        ])
+    return "\n".join(header + [""] + blocks + analysis_lines)
+
+
 # ── Shared cloudscraper session (bypasses JS challenges / Cloudflare) ──
 _scraper = cloudscraper.create_scraper(
     browser={"browser": "chrome", "platform": "windows"},
@@ -97,12 +106,14 @@ SEARCH_MAX_SITES = max(1, int(os.getenv("SEARCH_MAX_SITES", "4")))
 SEARCH_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_RESULTS_PER_QUERY", "1")))
 SEARCH_ENABLE_BROAD_WINDOW = os.getenv("SEARCH_ENABLE_BROAD_WINDOW", "false").strip().lower() in {"1", "true", "yes", "on"}
 SEARCH_REGION = os.getenv("SEARCH_REGION", "wt-wt")
-EXA_API_KEY = os.getenv("EXA_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 SEARCH_ANALYSIS_PROVIDER = os.getenv("SEARCH_ANALYSIS_PROVIDER", "hybrid").strip().lower()
 SEARCH_ANALYSIS_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_ANALYSIS_RESULTS_PER_QUERY", "2")))
 SEARCH_ANALYSIS_MAX_SNIPPETS = max(1, int(os.getenv("SEARCH_ANALYSIS_MAX_SNIPPETS", "4")))
+# Доп. запрос к Serper: новости, травмы, замены, форма, график (настраивается через .env)
+SEARCH_SERP_SUPPLEMENT_TERMS = os.getenv(
+    "SEARCH_SERP_SUPPLEMENT_TERMS",
+    "news injury suspension lineup transfer substitution fatigue form schedule rumors preview",
+).strip()
 GOOGLE_BACKOFF_SECONDS = max(60, int(os.getenv("GOOGLE_BACKOFF_SECONDS", "900")))
 _google_backoff_until = 0.0
 RUSSIAN_CONTEXT_HINTS = {
@@ -502,16 +513,30 @@ def _is_result_valid(entity: str, title: str, body: str, excerpt: str, url: str 
 
 def search_with_ddgs(query: str, num_results: int = 5, timelimit: str = "m") -> List[Dict[str, Any]]:
     """Search via DuckDuckGo using ddgs library (v9+)."""
+    if DDGS is None:
+        return []
     try:
         ddgs = DDGS()
         kwargs: Dict[str, Any] = {"max_results": num_results}
         if timelimit:
             kwargs["timelimit"] = timelimit
-        results = ddgs.text(query, **kwargs)
-        if results:
-            logger.info("DDG: %d results for: %s", len(results), query)
-            return results
-        logger.info("DDG: 0 results for: %s", query)
+        raw = ddgs.text(query, **kwargs)
+        if not raw:
+            logger.info("DDG: 0 results for: %s", query)
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in raw:
+            href = (item.get("href") or item.get("url") or item.get("link") or "").strip()
+            if not href:
+                continue
+            normalized.append({
+                "title": (item.get("title") or item.get("heading") or "")[:500],
+                "body": (item.get("body") or item.get("snippet") or "")[:500],
+                "href": href,
+                "search_engine": "ddg",
+            })
+        logger.info("DDG: %d results for: %s", len(normalized), query)
+        return normalized
     except Exception as exc:
         logger.debug("DDG failed for '%s': %s", query, exc)
     return []
@@ -731,9 +756,7 @@ def search_with_serper(query: str, num_results: int = 5) -> List[Dict[str, Any]]
         return []
 
 
-# ── Multi-engine search: DDG (validation) + Serper (primary data) ──
-# Bing/Yahoo/Yandex/Google scrapers disabled — unstable, slow, low value.
-# AI enrichment (Exa/Tavily) handled separately in Phase 3.
+# ── Multi-engine merge (утилита; основной порядок см. collect_validated_sources) ──
 SEARCH_ENGINE_ORDER = [
     ("ddg", search_with_ddgs),
     ("serper", search_with_serper),
@@ -741,7 +764,7 @@ SEARCH_ENGINE_ORDER = [
 
 
 def multi_engine_search(query: str, num_results: int = 8, timelimit: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Query ALL available search engines and merge deduplicated results."""
+    """Объединяет результаты DDG и Serper (сначала DDG, затем Serper)."""
     all_results: List[Dict[str, Any]] = []
     seen_urls: set = set()
 
@@ -1064,14 +1087,7 @@ def collect_validated_sources(
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             })
 
-    # --- Новый порядок: профильные библиотеки -> Serper -> Exa/Tavily ---
-    # 0. Валидация и регион определяются на этапе validate_match_request через DDG (не здесь)
-
-    # 1. Профильные библиотеки (если есть)
-    # (Реализуется в data_fetcher, здесь только заглушка для совместимости)
-    # validated_sources может быть заполнен до вызова этой функции, если data_fetcher уже добавил данные
-    if len(validated_sources) >= min_sources:
-        logger.info(f"[VALIDATE] Профильные библиотеки дали достаточно данных: {len(validated_sources)}")
+    def _enough_payload() -> Dict[str, Any]:
         return {
             "entity": entity,
             "discipline": discipline,
@@ -1080,45 +1096,55 @@ def collect_validated_sources(
             "freshness_window": timelimit,
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "validated_sources": validated_sources,
-            "analysis_sources": {},
+            "analysis_sources": analysis_sources,
             "validated_count": len(validated_sources),
             "enough_sources": True,
             "status": "validated",
         }
 
-    # 2. Serper (2 запроса на участника)
-    logger.info(f"[VALIDATE] Serper phase: entity={entity}, запрос={entity} {discipline_label} {stat_type}{context_suffix}")
-    serper_results = search_with_serper(f"{entity} {discipline_label} {stat_type}{context_suffix}", num_results=2)
-    logger.info(f"[VALIDATE] Serper вернул {len(serper_results)} результатов")
+    # 1. DuckDuckGo — первичная проверка сущности в открытом вебе (валидация участника/команды)
+    if DDGS is not None:
+        ddg_query = f"{entity} {discipline_label} {stat_type}{context_suffix}"
+        logger.info("[VALIDATE] DDG phase: %s", ddg_query)
+        ddg_results = search_with_ddgs(
+            ddg_query, num_results=max(6, min_sources + 4), timelimit=timelimit
+        )
+        _validate_and_collect(ddg_results)
+        logger.info("[VALIDATE] After DDG: %d validated for '%s'", len(validated_sources), entity)
+
+    if len(validated_sources) >= min_sources:
+        logger.info("[VALIDATE] After DDG достаточно данных: %d", len(validated_sources))
+        return _enough_payload()
+
+    # 2. Serper — основной запрос (статистика / профиль) + при нехватке — доп. контекст (новости, травмы, форма)
+    serper_primary = f"{entity} {discipline_label} {stat_type}{context_suffix}"
+    logger.info("[VALIDATE] Serper primary: %s", serper_primary)
+    serper_results = search_with_serper(serper_primary, num_results=3)
     _validate_and_collect(serper_results)
-    logger.info(f"[VALIDATE] После Serper: {len(validated_sources)} валидировано для '{entity}'")
-    # Fallback: если не найдено достаточно — пробуем альтернативный регион
+    logger.info("[VALIDATE] After Serper primary: %d validated for '%s'", len(validated_sources), entity)
+
+    if len(validated_sources) < min_sources and SEARCH_SERP_SUPPLEMENT_TERMS and SERPER_API_KEY:
+        supplement_q = f"{entity} {discipline_label} {SEARCH_SERP_SUPPLEMENT_TERMS}{context_suffix}"
+        logger.info("[VALIDATE] Serper supplement (news/form/injuries): %s", supplement_q)
+        _validate_and_collect(search_with_serper(supplement_q, num_results=3))
+
     if len(validated_sources) < min_sources and not fallback_attempted and region in ("ru", "intl"):
-        logger.info(f"[VALIDATE] Fallback: пробуем альтернативный регион для источников")
+        logger.info("[VALIDATE] Serper regional fallback: alt region for trusted site order")
         fallback_attempted = True
         alt_region = "intl" if region == "ru" else "ru"
         all_sites = get_ordered_entries(alt_region)
-        serper_results = search_with_serper(f"{entity} {discipline_label} {stat_type}{context_suffix}", num_results=2)
-        logger.info(f"[VALIDATE] Fallback Serper вернул {len(serper_results)} результатов")
-        _validate_and_collect(serper_results)
-        logger.info(f"[VALIDATE] После fallback Serper: {len(validated_sources)} валидировано для '{entity}'")
-    if len(validated_sources) >= min_sources:
-        logger.info(f"[VALIDATE] После Serper (и fallback) достаточно данных: {len(validated_sources)}")
-        return {
-            "entity": entity,
-            "discipline": discipline,
-            "stat_type": stat_type,
-            "min_sources": min_sources,
-            "freshness_window": timelimit,
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-            "validated_sources": validated_sources,
-            "analysis_sources": {},
-            "validated_count": len(validated_sources),
-            "enough_sources": True,
-            "status": "validated",
-        }
+        trusted_domains = {entry["site"] for entry in all_sites}
+        _validate_and_collect(search_with_serper(serper_primary, num_results=3))
+        if len(validated_sources) < min_sources and SEARCH_SERP_SUPPLEMENT_TERMS and SERPER_API_KEY:
+            supplement_q = f"{entity} {discipline_label} {SEARCH_SERP_SUPPLEMENT_TERMS}{context_suffix}"
+            _validate_and_collect(search_with_serper(supplement_q, num_results=3))
+        logger.info("[VALIDATE] After regional Serper: %d validated for '%s'", len(validated_sources), entity)
 
-    # 3. Exa/Tavily (по 1-2 запроса на участника)
+    if len(validated_sources) >= min_sources:
+        logger.info("[VALIDATE] После Serper достаточно данных: %d", len(validated_sources))
+        return _enough_payload()
+
+    # 3. Exa/Tavily — только если после DDG + Serper источников всё ещё мало
     if (EXA_API_KEY or TAVILY_API_KEY):
         logger.info(f"[VALIDATE] Exa/Tavily phase: entity={entity}, discipline={discipline}, stat_type={stat_type}, context_terms={context_terms}")
         analysis_sources = _collect_analysis_sources(
@@ -1213,6 +1239,28 @@ def collect_validated_sources(
 def validate_match_request(match_text: str, date_text: str, discipline: str) -> Dict[str, Any]:
     sides = split_match_text(match_text)
     discipline_key = _normalize_validation_discipline_key(discipline)
+    discipline_label = _DISCIPLINE_SEARCH_LABEL.get(discipline_key, discipline_key)
+
+    if len(sides) < 2:
+        return {
+            "status": "insufficient_sources",
+            "match": None,
+            "report": "Укажите двух участников в формате «Команда А vs Команда Б» (или «против»).",
+            "validated_count": 0,
+        }
+
+    event_note = ""
+    if DDGS is not None:
+        date_part = (date_text or "").strip()
+        match_q = f"{sides[0]} vs {sides[1]} {date_part} {discipline_label} match preview".strip()
+        ev_hits = search_with_ddgs(match_q, num_results=5, timelimit="m")
+        if ev_hits:
+            event_note = f"Событие (DDG): найдено {len(ev_hits)} ссылок по запросу матча.\n\n"
+        else:
+            event_note = (
+                "Событие (DDG): по полному запросу мало ссылок — дальше валидация участников (DDG → Serper).\n\n"
+            )
+
     participant_reports = []
     regions = []
     for side in sides:
@@ -1229,7 +1277,7 @@ def validate_match_request(match_text: str, date_text: str, discipline: str) -> 
         region = None
         for src in rep.get("validated_sources", []):
             # Используем region из DISCIPLINE_SOURCE_CONFIG
-            for entry in DISCIPLINE_SOURCE_CONFIG[discipline_key]:
+            for entry in DISCIPLINE_SOURCE_CONFIG.get(discipline_key, []):
                 if src.get("site") == entry["site"] and entry.get("region") == "ru":
                     region = "ru"
                     break
@@ -1249,6 +1297,7 @@ def validate_match_request(match_text: str, date_text: str, discipline: str) -> 
     region = "ru" if regions.count("ru") >= regions.count("intl") else "intl"
     normalized_date = date_text.strip() if date_text else "дата не указана"
     report_lines = [
+        event_note,
         f"Валидация 1 контура: участники подтверждены для дисциплины {discipline_key}.",
         "Дата матча используется из ввода пользователя.",
         "",
@@ -1272,30 +1321,6 @@ def validate_match_request(match_text: str, date_text: str, discipline: str) -> 
         "report": "\n\n".join(report_lines),
         "validated_count": sum(report.get("validated_count", 0) for report in participant_reports),
     }
-
-    analysis = report.get("analysis_sources") or {}
-    analysis_answers = analysis.get("answers") or []
-    analysis_snippets = analysis.get("snippets") or []
-    analysis_engines = ", ".join(analysis.get("used_engines") or []) or "нет"
-
-    analysis_lines = [
-        "",
-        f"Аналитический поиск (Exa/Tavily): {analysis_engines}",
-    ]
-    for answer in analysis_answers:
-        analysis_lines.append(f"Ответ движка: {answer}")
-    for idx, snippet in enumerate(analysis_snippets, start=1):
-        analysis_lines.extend(
-            [
-                f"Аналитика {idx}: {snippet['search_engine']} ({snippet['site']})",
-                f"Query: {snippet['query']}",
-                f"Заголовок: {snippet['title']}",
-                f"Сниппет: {snippet['body']}",
-                f"Ссылка: {snippet['href']}",
-            ]
-        )
-
-    return "\n".join(header + [""] + blocks + analysis_lines)
 
 
 def _search(entity: str, discipline: str, stat_type: str, context_terms: Optional[str] = None) -> str:

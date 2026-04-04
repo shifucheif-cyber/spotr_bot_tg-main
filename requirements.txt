@@ -1,4 +1,5 @@
 aiogram
+pytz
 google-genai
 groq
 openai

@@ -402,23 +402,7 @@ def fetch_match_analysis_data(
     logger.info(f"[FETCH] Контекст для side1: {ctx1}")
     logger.info(f"[FETCH] Контекст для side2: {ctx2}")
 
-    fetch_fn = getattr(fetcher, fetch_method)
-    try:
-        logger.info(f"[FETCH] Запрос данных для side1: {side1}")
-        data1 = fetch_fn(side1, context_terms=ctx1)
-        logger.info(f"[FETCH] Данные side1 получены: {bool(data1)}")
-    except Exception as e:
-        logger.error("[FETCH] Fetch failed for %s: %s", side1, e)
-        data1 = None
-    try:
-        logger.info(f"[FETCH] Запрос данных для side2: {side2}")
-        data2 = fetch_fn(side2, context_terms=ctx2)
-        logger.info(f"[FETCH] Данные side2 получены: {bool(data2)}")
-    except Exception as e:
-        logger.error("[FETCH] Fetch failed for %s: %s", side2, e)
-        data2 = None
-
-    # --- Новый блок: сбор тотала и H2H через профильные библиотеки ---
+    # --- Сначала профильные библиотеки (HLTV, sportsipy и т.д.), затем веб: DDG → Serper → Exa/Tavily ---
     total_line = ""
     h2h_line = ""
     try:
@@ -488,6 +472,22 @@ def fetch_match_analysis_data(
             total_line = "🎯 Тотал: среднее количество сетов за 5 последних матчей (нет открытого API)"
     except Exception as e:
         logger.warning(f"Extra stats fetch failed: {e}")
+
+    fetch_fn = getattr(fetcher, fetch_method)
+    try:
+        logger.info(f"[FETCH] Запрос данных для side1: {side1}")
+        data1 = fetch_fn(side1, context_terms=ctx1)
+        logger.info(f"[FETCH] Данные side1 получены: {bool(data1)}")
+    except Exception as e:
+        logger.error("[FETCH] Fetch failed for %s: %s", side1, e)
+        data1 = None
+    try:
+        logger.info(f"[FETCH] Запрос данных для side2: {side2}")
+        data2 = fetch_fn(side2, context_terms=ctx2)
+        logger.info(f"[FETCH] Данные side2 получены: {bool(data2)}")
+    except Exception as e:
+        logger.error("[FETCH] Fetch failed for %s: %s", side2, e)
+        data2 = None
 
     parts = [f"{emoji} Матч: {side1.upper()} vs {side2.upper()}"]
     if total_line:
