@@ -435,10 +435,18 @@ def _build_site_queries(entity: str, site: str, stat_type: str, context_terms: O
     if not context_variants:
         context_variants = [""]
 
+    extra_keywords = [
+        "average total points last matches",
+        "average total goals last matches",
+        "recent head-to-head scores"
+    ]
     for entity_variant in entity_variants[:3]:
         for context_variant in context_variants[:2]:
             tail = f" {context_variant}" if context_variant else ""
             queries.append(f"{entity_variant} {stat_type}{tail} site:{site}".strip())
+        # Добавляем дополнительные поисковые запросы для тотала и head-to-head
+        for kw in extra_keywords:
+            queries.append(f"{entity_variant} {kw} site:{site}")
 
     deduplicated: List[str] = []
     seen = set()
@@ -955,11 +963,30 @@ def _collect_analysis_sources(
     if not sites:
         return {"answers": [], "snippets": [], "used_engines": []}
 
+    # --- Обязательные поисковые ключи для H2H и тоталов ---
+    extra_queries = []
+    if entity and context_terms:
+        # Предполагаем, что context_terms содержит "vs" и обе команды
+        h2h_query = f"{context_terms} last 5 matches scores and head-to-head"
+        extra_queries.append(h2h_query)
+    if entity:
+        # Для тоталов — подбираем ключ по дисциплине
+        avg_total = "average goals per match last 10 games"
+        if discipline == "basketball":
+            avg_total = "average points per match last 10 games"
+        elif discipline in ("mma", "boxing"):
+            avg_total = "average rounds per match last 10 fights"
+        elif discipline in ("tennis", "table_tennis", "volleyball"):
+            avg_total = "average games per match last 10 matches"
+        extra_queries.append(f"{entity} {avg_total}")
+
     for site in sites[:2]:
         if queries_made >= max_queries:
             break
         queries = _build_site_queries(entity, site, stat_type, context_terms)
-        for query in queries[:1]:
+        # Добавляем обязательные queries
+        queries = queries[:1] + extra_queries
+        for query in queries:
             if queries_made >= max_queries:
                 break
             queries_made += 1

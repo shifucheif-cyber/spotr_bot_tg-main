@@ -55,42 +55,80 @@ def extract_betting_data(llm_response: str) -> dict:
     match = re.search(r'```json\s*(\{.*?\})\s*```', llm_response, re.DOTALL | re.IGNORECASE)
     if not match:
         match = re.search(r'(\{.*?\})', llm_response, re.DOTALL)
+    result = {
+        "probability": None,
+        "win_probability_team1": None,
+        "win_probability_team2": None,
+        "odds": None,
+        "draw_probability": None,
+        "recommended_bet_size": None,
+        "confidence_score": None,
+        "analysis_summary": None,
+        "exact_score": "Н/Д",
+        "total_prediction": "Н/Д",
+        "total_recommendation": "Н/Д",
+        "total_value": "Н/Д"
+    }
     if match:
         try:
             json_str = match.group(1).strip()
             data = json.loads(json_str)
-            # Новые поля для обеих команд
+            # Вероятности
             prob_t1 = data.get("win_probability_team1")
             prob_t2 = data.get("win_probability_team2")
             if prob_t1 is not None:
-                prob_t1 = float(prob_t1)
+                try: prob_t1 = float(prob_t1)
+                except: prob_t1 = None
             if prob_t2 is not None:
-                prob_t2 = float(prob_t2)
-            # Старый формат
+                try: prob_t2 = float(prob_t2)
+                except: prob_t2 = None
             if prob_t1 is None:
                 prob_val = data.get("probability")
                 if prob_val is not None:
-                    prob_t1 = float(prob_val)
-            # Если только одна вероятность, вторая считается автоматически в response_formatter
-            odds_val = data.get("odds")
-            if odds_val is not None:
-                odds = float(odds_val)
-            return {
-                "probability": prob_t1,
-                "win_probability_team1": prob_t1,
-                "win_probability_team2": prob_t2,
-                "odds": odds,
-                "draw_probability": data.get("draw_probability"),
-                "recommended_bet_size": data.get("recommended_bet_size"),
-                "confidence_score": data.get("confidence_score"),
-                "analysis_summary": data.get("analysis_summary")
-            }
-        except (json.JSONDecodeError, ValueError, TypeError):
+                    try: prob_t1 = float(prob_val)
+                    except: prob_t1 = None
+            result["probability"] = prob_t1
+            result["win_probability_team1"] = prob_t1
+            result["win_probability_team2"] = prob_t2
+            # Остальные поля
+            result["odds"] = float(data.get("odds")) if data.get("odds") is not None else None
+            result["draw_probability"] = data.get("draw_probability")
+            result["recommended_bet_size"] = data.get("recommended_bet_size")
+            result["confidence_score"] = data.get("confidence_score")
+            result["analysis_summary"] = data.get("analysis_summary")
+            # exact_score
+            exact_score = data.get("exact_score")
+            if isinstance(exact_score, str) and ":" in exact_score:
+                result["exact_score"] = exact_score
+            else:
+                result["exact_score"] = "Н/Д"
+            # total_prediction (float из строки или числа)
+            total_pred = data.get("total_prediction")
+            if isinstance(total_pred, (int, float)):
+                result["total_prediction"] = float(total_pred)
+            elif isinstance(total_pred, str):
+                nums = re.findall(r"\d+[\.,]?\d*", total_pred)
+                if nums:
+                    result["total_prediction"] = float(nums[0].replace(",", "."))
+                else:
+                    result["total_prediction"] = "Н/Д"
+            # total_recommendation
+            total_rec = data.get("total_recommendation")
+            if isinstance(total_rec, str) and total_rec.strip():
+                result["total_recommendation"] = total_rec.strip()
+            # total_value (совместимость)
+            total_val = data.get("total_value")
+            if isinstance(total_val, str) and total_val.strip():
+                result["total_value"] = total_val.strip()
+            elif result["total_prediction"] != "Н/Д":
+                result["total_value"] = str(result["total_prediction"])
+        except Exception:
             pass
     # Fallback to regex for probability
-    if prob_t1 is None:
-        prob_t1 = extract_probability(llm_response)
-    return {"probability": prob_t1, "win_probability_team1": prob_t1, "win_probability_team2": prob_t2, "odds": odds}
+    if result["probability"] is None:
+        result["probability"] = extract_probability(llm_response)
+        result["win_probability_team1"] = result["probability"]
+    return result
 
 
 def calculate_value_bet(probability: float, odds: float | None = None) -> dict:

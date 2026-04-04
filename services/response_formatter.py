@@ -38,6 +38,15 @@ def _sanitize_side_summary(text: str) -> str:
 
 
 def format_response_contract(match_text: str, raw_analysis: str, prediction_struct: dict) -> str:
+
+    # --- Новые поля: точный счет, тотал, рекомендации ---
+    exact_score = prediction_struct.get("exact_score", "Н/Д")
+    total_prediction = prediction_struct.get("total_prediction", "Н/Д")
+    total_recommendation = prediction_struct.get("total_recommendation", "Н/Д")
+    total_value = prediction_struct.get("total_value", "Н/Д")
+    kelly_index = prediction_struct.get("stake_percent", "Н/Д")
+    analysis_summary = prediction_struct.get("analysis_summary", "")
+
     """
     Format final response as a brief prognosis card.
     Extracts short summaries per participant + key prediction fields.
@@ -99,41 +108,21 @@ def format_response_contract(match_text: str, raw_analysis: str, prediction_stru
                         side2_summary = text
                     break
 
-    stake_text = str(stake) if stake is not None else "ПРОПУСК"
-    lines = [f"📊 **Матч:** {match_text}", ""]
-    if total:
-        lines.append(f"🎯 **Тотал:** {total}")
-    if side1_summary and len(sides) == 2:
-        lines.append(f"• **{sides[0]}:** {side1_summary}")
-    if side2_summary and len(sides) == 2:
-        lines.append(f"• **{sides[1]}:** {side2_summary}")
-    if side1_summary or side2_summary:
-        lines.append("")
-
-    # --- Вероятности обеих команд ---
+    stake_text = str(stake) if stake is not None else "ПРОПУСТИТЬ"
+    # --- HTML-структура для Telegram ---
+    html = []
+    html.append(f"🏆 <b>Победитель:</b> {winner or '?'}")
     if len(sides) == 2 and prob1 is not None and prob2 is not None:
-        lines.append(f"📈 **Вероятность:** [{sides[0]}] — {prob1:.1f}% | [{sides[1]}] — {prob2:.1f}%")
+        html.append(f"📈 <b>Вероятность:</b> {sides[0]} {prob1:.1f}% | {sides[1]} {prob2:.1f}%")
     elif prob1 is not None:
-        lines.append(f"📈 **Вероятность:** {prob1:.1f}%")
+        html.append(f"📈 <b>Вероятность:</b> {prob1:.1f}%")
     else:
-        lines.append(f"📈 **Вероятность:** не определена")
-
-    # --- Победитель с уверенностью ---
-    winner_prob = None
-    if winner and len(sides) == 2:
-        # Определяем, какая команда победитель, и берем её вероятность
-        if winner.strip().lower() == sides[0].strip().lower():
-            winner_prob = prob1
-        elif winner.strip().lower() == sides[1].strip().lower():
-            winner_prob = prob2
-    lines.append(f"🏆 **Победитель:** {winner or '?'}" + (f" (Уверенность: {winner_prob:.1f}%)" if winner_prob is not None else ""))
-
-    lines += [
-        f"🔢 **Счёт:** {score or '?'}",
-        f"💰 **Ставка:** {stake_text}",
-        f"💡 {prediction_struct.get('recommendation', '')}",
-    ]
-    return "\n".join(lines)
+        html.append(f"📈 <b>Вероятность:</b> не определена")
+    html.append(f"🔢 <b>Прогноз счета:</b> {exact_score if exact_score else 'Н/Д'}")
+    html.append(f"📊 <b>Ожидаемый тотал:</b> {total_prediction if total_prediction else 'Н/Д'} ({total_recommendation if total_recommendation else 'Н/Д'})")
+    html.append(f"💰 <b>Ставка:</b> {prediction_struct.get('recommendation', 'Н/Д')} (Келли: {kelly_index})")
+    html.append(f"💡 <b>Анализ:</b> {analysis_summary}")
+    return "\n".join(html)
 
 
 def split_long_message(text: str, max_length: int = 4000) -> list[str]:

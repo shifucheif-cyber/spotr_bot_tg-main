@@ -1,4 +1,4 @@
-import pytz
+﻿import pytz
 from datetime import datetime, timedelta, timezone
 import os
 import datetime as datetime_module
@@ -318,17 +318,25 @@ async def start_analysis(message: types.Message, state: FSMContext):
         m = data.get('found_match') or {}
         match_name = f"{m.get('home','')} vs {m.get('away','')}" or data.get('match')
         ctx = {"date": m.get("date") or data.get("date"), "league": m.get("league", ""), "sport": m.get("sport", ""), "home": m.get("home", ""), "away": m.get("away", "")}
-        
+
         block = f"Матч: {match_name}\nДата: {ctx['date']}\nЛига: {ctx['league']}\n{data.get('match_validation_report', '')}"
         payload, search_data = await fetch_match_data(match_name, disc, ctx, block)
-        res = await generate_content_with_metadata(payload, disc, data.get('discipline_key'))
-        
+
+        # Очистка HTML-тегов из search_data
+        clean_search_data = re.sub(r'<[^>]+>', '', search_data) if search_data else ''
+        # Вставка статистического блока
+        stat_block = f"\n\nCONTEXT DATA FOR ANALYSIS: {clean_search_data}\nPlease identify recent H2H scores and average totals from this text to calculate your prediction. Используй следующие статистические данные для расчета точного счета и тотала: {clean_search_data}. Опирайся на реальные цифры последних встреч."
+        full_prompt = f"{payload}\n{stat_block}"
+
+        res = await generate_content_with_metadata(full_prompt, disc, data.get('discipline_key'))
+
         if res.get("text"):
             record_analysis_result(message.from_user.id, discipline=disc, match_text=match_name, success=True)
             final = format_prediction_response(match_name, res["text"])
             for part in split_long_message(final):
-                await message.answer(part, parse_mode="Markdown")
-        else: await message.answer("⚠️ Нет ответа")
+                await message.answer(part, parse_mode="HTML")
+        else:
+            await message.answer("⚠️ Нет ответа")
     except Exception as e:
         logger.error(f"Analysis error: {e}")
         await message.answer("❌ Ошибка при анализе.")

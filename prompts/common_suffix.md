@@ -58,6 +58,7 @@
 💰 **Рекомендуемый % от банка:** X%
 
 **КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: В САМОМ КОНЦЕ ОТВЕТА ВЫВЕДИ JSON БЛОК СЛЕДУЮЩЕГО ФОРМАТА (ДЛЯ АВТОМАТИЧЕСКОЙ ОБРАБОТКИ):**
+
 ```json
 {
   "win_probability_team1": X,
@@ -65,7 +66,11 @@
   "draw_probability": Z,
   "recommended_bet_size": S,
   "confidence_score": C,
-  "analysis_summary": "краткое резюме анализа (1-2 предложения)"
+  "analysis_summary": "краткое резюме анализа (1-2 предложения)",
+  "exact_score": "<строка или null>",
+  "total_prediction": <float или строка>,
+  "total_recommendation": "<строка или null>",
+  "total_value": "<строка или null>"
 }
 ```
 Где:
@@ -73,3 +78,14 @@
 - S — рекомендуемый % от банка (число 1, 3, 5 или 0 для пропуска).
 - C — уверенность в данных (от 0.0 до 1.0).
 - analysis_summary — строка с кратким итогом.
+- exact_score — точный прогноз по счёту (например, "2:1", "105:98" и т.д.), если применимо.
+- total_prediction — ожидаемое значение тотала (float, например, 2.5, 210.5). Если модель присылает строку, извлечь число.
+- total_recommendation — совет по ставке на тотал (например, "ТБ 2.5", "ТМ 220.5", "Over 2.5 rounds").
+- total_value — строка для совместимости (может дублировать total_prediction или быть пустой).
+
+**Логические инструкции для модели:**
+- exact_score: "Provide a realistic score based on the analyzed H2H and defensive/offensive form (e.g., '2:1', '105:98')."
+- total_prediction: "Expected total value (float). Must be logically consistent with your exact_score."
+- total_recommendation: "Betting advice for total (e.g., 'Over 2.5', 'Under 212.5', 'Over 2.5 rounds')."
+- Логический фильтр: "If the winner is Team B, the first digit in exact_score must be smaller than the second digit (e.g., Winner: Team B -> Score: 1:2)."
+- Прогноз счета должен соответствовать прогнозу тотала.
