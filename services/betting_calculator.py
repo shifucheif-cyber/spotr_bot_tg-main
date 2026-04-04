@@ -45,7 +45,7 @@ def extract_probability(llm_response: str) -> float | None:
 def extract_betting_data(llm_response: str) -> dict:
     """
     Searches for a JSON block within the response text.
-    Falls back to existing regex for probability ONLY if JSON loading fails.
+    Falls back to existing regex for probability ONLY if JSON loading fails or fields are missing.
     """
     probability = None
     odds = None
@@ -57,13 +57,34 @@ def extract_betting_data(llm_response: str) -> dict:
         
     if match:
         try:
-            data = json.loads(match.group(1))
-            prob_val = data.get("probability")
+            # Clean up the string in case there's garbage
+            json_str = match.group(1).strip()
+            data = json.loads(json_str)
+            
+            # 1. Try new forced JSON format
+            prob_t1 = data.get("win_probability_team1")
+            if prob_t1 is not None:
+                probability = float(prob_t1)
+            
+            # 2. Try old/generic JSON fields
+            if probability is None:
+                prob_val = data.get("probability")
+                if prob_val is not None:
+                    probability = float(prob_val)
+            
             odds_val = data.get("odds")
-            if prob_val is not None:
-                probability = float(prob_val)
             if odds_val is not None:
                 odds = float(odds_val)
+                
+            # Store additional fields if needed for future use
+            return {
+                "probability": probability,
+                "odds": odds,
+                "draw_probability": data.get("draw_probability"),
+                "recommended_bet_size": data.get("recommended_bet_size"),
+                "confidence_score": data.get("confidence_score"),
+                "analysis_summary": data.get("analysis_summary")
+            }
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
             
@@ -123,8 +144,8 @@ def get_bet_recommendation(llm_response: str) -> dict:
     Main function: extracts data and calculates bet recommendations.
     """
     data = extract_betting_data(llm_response)
-    probability = data["probability"]
-    odds = data["odds"]
+    probability = data.get("probability")
+    odds = data.get("odds")
     
     if probability is None:
         hint = "В ответе модели не найдена строка с числом вида «Вероятность победы: N%»."
@@ -138,11 +159,25 @@ def get_bet_recommendation(llm_response: str) -> dict:
         }
         
     probability = max(0, min(100, probability))
+    
+    # Priority to JSON recommended bet size
+    json_bet_size = data.get("recommended_bet_size")
     value_data = calculate_value_bet(probability, odds)
     
+    stake_percent = value_data["stake_percent"]
+    if json_bet_size is not None:
+        try:
+            s_val = float(json_bet_size)
+            if s_val > 0:
+                stake_percent = f"{s_val}%"
+            else:
+                stake_percent = "ПРОПУСК"
+        except (ValueError, TypeError):
+            pass
+
     return {
         "probability": probability,
-        "stake_percent": value_data["stake_percent"],
+        "stake_percent": stake_percent,
         "recommendation": value_data["recommendation"],
         "status": "success",
     }
