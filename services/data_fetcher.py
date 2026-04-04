@@ -378,11 +378,15 @@ def fetch_match_analysis_data(
 
     Used by all sport services. Returns the raw validated report for LLM consumption.
     """
+
+    logger.info(f"[FETCH] Начало анализа: match_name={match_name}, fetcher={fetcher}, fetch_method={fetch_method}, emoji={emoji}, match_context={match_context}")
     teams = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s*-\s*", match_name, flags=re.I)
     if len(teams) != 2:
+        logger.warning(f"[FETCH] Не удалось определить участников матча: {match_name}")
         return f"Матч: {match_name}\n\nНе удалось определить участников матча."
 
     side1, side2 = teams[0].strip(), teams[1].strip()
+    logger.info(f"[FETCH] Участники: side1={side1}, side2={side2}")
 
     # ── Проверяем кэш (одинаковые участники + дисциплина + дата) ──
     discipline = getattr(fetcher, '_discipline', None) or getattr(fetcher, 'game_key', None) or fetcher.__class__.__name__.replace('Fetcher', '').lower()
@@ -390,21 +394,28 @@ def fetch_match_analysis_data(
     cache_k = _cache_key(discipline, side1, side2, match_date)
     cached = _get_cached(cache_k)
     if cached is not None:
+        logger.info(f"[FETCH] Найден кэш для ключа: {cache_k}")
         return cached
 
     ctx1 = _build_context(match_context, side2)
     ctx2 = _build_context(match_context, side1)
+    logger.info(f"[FETCH] Контекст для side1: {ctx1}")
+    logger.info(f"[FETCH] Контекст для side2: {ctx2}")
 
     fetch_fn = getattr(fetcher, fetch_method)
     try:
+        logger.info(f"[FETCH] Запрос данных для side1: {side1}")
         data1 = fetch_fn(side1, context_terms=ctx1)
+        logger.info(f"[FETCH] Данные side1 получены: {bool(data1)}")
     except Exception as e:
-        logger.error("Fetch failed for %s: %s", side1, e)
+        logger.error("[FETCH] Fetch failed for %s: %s", side1, e)
         data1 = None
     try:
+        logger.info(f"[FETCH] Запрос данных для side2: {side2}")
         data2 = fetch_fn(side2, context_terms=ctx2)
+        logger.info(f"[FETCH] Данные side2 получены: {bool(data2)}")
     except Exception as e:
-        logger.error("Fetch failed for %s: %s", side2, e)
+        logger.error("[FETCH] Fetch failed for %s: %s", side2, e)
         data2 = None
 
     # --- Новый блок: сбор тотала и H2H через профильные библиотеки ---

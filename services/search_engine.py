@@ -70,7 +70,11 @@ try:
 except ImportError:
     google_search_lib = None
 
+
 logger = logging.getLogger(__name__)
+logger.info(f"[KEYS] EXA_API_KEY={'SET' if EXA_API_KEY else 'MISSING'}")
+logger.info(f"[KEYS] TAVILY_API_KEY={'SET' if TAVILY_API_KEY else 'MISSING'}")
+logger.info(f"[KEYS] SERPER_API_KEY={'SET' if SERPER_API_KEY else 'MISSING'}")
 
 # ── Shared cloudscraper session (bypasses JS challenges / Cloudflare) ──
 _scraper = cloudscraper.create_scraper(
@@ -1002,6 +1006,8 @@ def collect_validated_sources(
     context_terms: Optional[str] = None,
     region: Optional[str] = None,
 ) -> Dict[str, Any]:
+    analysis_sources = {}
+    logger.info(f"[VALIDATE] Старт: entity={entity}, discipline={discipline}, stat_type={stat_type}, region={region}, min_sources={min_sources}")
     all_sites = DISCIPLINE_SOURCE_CONFIG.get(discipline, [])
     trusted_domains = {entry["site"] for entry in all_sites}
     # Приоритизация источников по региону с fallback
@@ -1060,7 +1066,7 @@ def collect_validated_sources(
     # (Реализуется в data_fetcher, здесь только заглушка для совместимости)
     # validated_sources может быть заполнен до вызова этой функции, если data_fetcher уже добавил данные
     if len(validated_sources) >= min_sources:
-        logger.info("Профильные библиотеки дали достаточно данных (%d)", len(validated_sources))
+        logger.info(f"[VALIDATE] Профильные библиотеки дали достаточно данных: {len(validated_sources)}")
         return {
             "entity": entity,
             "discipline": discipline,
@@ -1076,20 +1082,23 @@ def collect_validated_sources(
         }
 
     # 2. Serper (2 запроса на участника)
-    logger.info("Serper phase: основной источник для аналитики")
+    logger.info(f"[VALIDATE] Serper phase: entity={entity}, запрос={entity} {discipline_label} {stat_type}{context_suffix}")
     serper_results = search_with_serper(f"{entity} {discipline_label} {stat_type}{context_suffix}", num_results=2)
+    logger.info(f"[VALIDATE] Serper вернул {len(serper_results)} результатов")
     _validate_and_collect(serper_results)
-    logger.info("After Serper: %d validated for '%s'", len(validated_sources), entity)
+    logger.info(f"[VALIDATE] После Serper: {len(validated_sources)} валидировано для '{entity}'")
     # Fallback: если не найдено достаточно — пробуем альтернативный регион
     if len(validated_sources) < min_sources and not fallback_attempted and region in ("ru", "intl"):
-        logger.info("Fallback: пробуем альтернативный регион для источников")
+        logger.info(f"[VALIDATE] Fallback: пробуем альтернативный регион для источников")
         fallback_attempted = True
         alt_region = "intl" if region == "ru" else "ru"
         all_sites = get_ordered_entries(alt_region)
         serper_results = search_with_serper(f"{entity} {discipline_label} {stat_type}{context_suffix}", num_results=2)
+        logger.info(f"[VALIDATE] Fallback Serper вернул {len(serper_results)} результатов")
         _validate_and_collect(serper_results)
-        logger.info("After fallback Serper: %d validated for '%s'", len(validated_sources), entity)
+        logger.info(f"[VALIDATE] После fallback Serper: {len(validated_sources)} валидировано для '{entity}'")
     if len(validated_sources) >= min_sources:
+        logger.info(f"[VALIDATE] После Serper (и fallback) достаточно данных: {len(validated_sources)}")
         return {
             "entity": entity,
             "discipline": discipline,
@@ -1106,12 +1115,13 @@ def collect_validated_sources(
 
     # 3. Exa/Tavily (по 1-2 запроса на участника)
     if (EXA_API_KEY or TAVILY_API_KEY):
-        logger.info("Exa/Tavily phase: резервный источник для аналитики")
+        logger.info(f"[VALIDATE] Exa/Tavily phase: entity={entity}, discipline={discipline}, stat_type={stat_type}, context_terms={context_terms}")
         analysis_sources = _collect_analysis_sources(
             entity, discipline, stat_type, context_terms,
             [e["site"] for e in all_sites],
             max_queries=2,
         )
+        logger.info(f"[VALIDATE] Exa/Tavily вернул {len(analysis_sources.get('snippets', []))} snippets")
         for snip in analysis_sources.get("snippets", []):
             if len(validated_sources) >= min_sources:
                 break
@@ -1127,8 +1137,9 @@ def collect_validated_sources(
                 "trusted_domain": True,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             })
-        logger.info("After Exa/Tavily: %d validated for '%s'", len(validated_sources), entity)
+        logger.info(f"[VALIDATE] После Exa/Tavily: {len(validated_sources)} валидировано для '{entity}'")
         if len(validated_sources) >= min_sources:
+            logger.info(f"[VALIDATE] После Exa/Tavily достаточно данных: {len(validated_sources)}")
             return {
                 "entity": entity,
                 "discipline": discipline,
@@ -1145,8 +1156,7 @@ def collect_validated_sources(
 
     # ── Fallback: if still nothing validated, take best-matching raw results ──
     if not validated_sources and unvalidated_results:
-        logger.info("Fallback: scoring %d unvalidated results for '%s'",
-                     len(unvalidated_results), entity)
+        logger.info(f"[VALIDATE] Fallback: scoring {len(unvalidated_results)} unvalidated results for '{entity}'")
         entity_tokens = _normalize_tokens(entity)
         scored: List[tuple] = []
         for result in unvalidated_results:

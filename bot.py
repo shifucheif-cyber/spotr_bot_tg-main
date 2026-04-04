@@ -1,17 +1,26 @@
-﻿import pytz
-# --- LOAD ENV ---
+﻿def to_moscow_time(dt: 'datetime') -> 'datetime':
+    """Преобразует datetime (UTC или naive) в московское время."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MOSCOW_TZ)
+
+
+import pytz
+from datetime import datetime, timedelta, timezone
+import os
+import datetime as datetime_module
+import re
+import asyncio
+import logging
+
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
+# --- Функция преобразования времени ---
 def to_moscow_time(dt: datetime) -> datetime:
     """Преобразует datetime (UTC или naive) в московское время."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(MOSCOW_TZ)
-import os
-import re
-import asyncio
-import logging
-from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.context import FSMContext
@@ -19,7 +28,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 
+
 from dotenv import load_dotenv
+# --- LOAD ENV ---
+from pathlib import Path
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+
 from google.genai import Client as GoogleClient
 from google.genai import types as genai_types
 from groq import Client as GroqClient, GroqError
@@ -40,9 +54,6 @@ from services.user_store import (
     touch_user,
 )
 
-# --- LOAD ENV ---
-load_dotenv()
-
 configure_console_output()
 configure_logging(default_level="WARNING")
 logger = logging.getLogger(__name__)
@@ -55,7 +66,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.0-pro")  # Минимум Gemini 2.0, по умолчанию самая свежая стабильная
 GOOGLE_API_VERSION = os.getenv("GOOGLE_API_VERSION", "v1")
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = "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"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "compound-beta-mini")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com")
 
