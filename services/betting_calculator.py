@@ -5,20 +5,40 @@ import json
 
 def extract_probability(llm_response: str) -> float | None:
     """
-    Extracts probability percentage from LLM response using fallback regex patterns.
+    Извлекает процент вероятности из ответа модели.
+    Учитывает markdown из контракта: «📈 **Вероятность победы (1-я сторона):** 58%» —
+    после скобки идёт `):**`, старые шаблоны с [:\s]+ после «сторона» не срабатывали.
     """
-    match = re.search(r'Вероятность[^:]*:\s*(\d+(?:[.,]\d+)?)\s*%', llm_response, re.IGNORECASE)
-    if match: return float(match.group(1).replace(',', '.'))
-    
-    match = re.search(r'[Пп]\s*[=:]\s*(\d+(?:[.,]\d+)?)\s*%', llm_response)
-    if match: return float(match.group(1).replace(',', '.'))
-    
-    match = re.search(r'вероятность[^:]*:\s*(\d+(?:[.,]\d+)?)\s*%', llm_response, re.IGNORECASE)
-    if match: return float(match.group(1).replace(',', '.'))
-    
-    match = re.search(r'(\d+(?:[.,]\d+)?)\s*%', llm_response)
-    if match: return float(match.group(1).replace(',', '.'))
-    
+    prioritized = [
+        # Контракт бота: 📈 **Вероятность победы (1-я сторона):** N%
+        r"📈\s*\*+\s*Вероятность\s+победы[^%]+?(\d+(?:[.,]\d+)?)\s*%",
+        r"📈\s*Вероятность\s+победы[^%]+?(\d+(?:[.,]\d+)?)\s*%",
+        r"Вероятность\s+победы\s*\([^)]*\)\s*:\s*\*+\s*(\d+(?:[.,]\d+)?)\s*%",
+        r"Вероятность\s+победы[^%]+?(\d+(?:[.,]\d+)?)\s*%",
+        # «Вероятность:» с опциональными звёздочками после двоеточия
+        r"Вероятность[^%\n]{0,120}:\s*\*+\s*(\d+(?:[.,]\d+)?)\s*%",
+        r"Вероятность[^%\n]{0,120}:\s*(\d+(?:[.,]\d+)?)\s*%",
+        r"[Pp]\s*[=:]\s*(\d+(?:[.,]\d+)?)\s*%",
+        r"вероятность[^%\n]{0,120}:\s*(\d+(?:[.,]\d+)?)\s*%",
+    ]
+    for pat in prioritized:
+        m = re.search(pat, llm_response, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        if m:
+            val = float(m.group(1).replace(",", "."))
+            if 0 <= val <= 100:
+                return val
+
+    tail = llm_response[-2500:] if len(llm_response) > 2500 else llm_response
+    m = re.search(
+        r"(?:📈\s*)?(?:\*\*)?\s*Вероятность[^%]{0,200}?(\d+(?:[.,]\d+)?)\s*%",
+        tail,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        v = float(m.group(1).replace(",", "."))
+        if 0 <= v <= 100:
+            return v
+
     return None
 
 
@@ -59,7 +79,13 @@ def calculate_value_bet(probability: float, odds: float | None = None) -> dict:
     Calculates value bet metrics and Kelly criterion fraction.
     """
     if probability <= 0 or probability >= 100:
-        return {"recommendation": "Недопустимая вероятность", "stake_percent": "0"}
+        return {
+            "recommendation": (
+                "Модель дала крайнее значение (0% или 100%) — для Келли/валуй это недопустимо; "
+                "ставку не считаем. Считайте прогноз условным или повторите запрос."
+            ),
+            "stake_percent": "ПРОПУСК",
+        }
         
     fair_odds = 100 / probability
     
@@ -100,11 +126,14 @@ def get_bet_recommendation(llm_response: str) -> dict:
     probability = data["probability"]
     odds = data["odds"]
     
-    if probability is None or probability == 0:
+    if probability is None:
+        hint = "В ответе модели не найдена строка с числом вида «Вероятность победы: N%»."
+        if re.search(r"Вероятность[^%\n]*\bP\s*%", llm_response, re.I):
+            hint = "Модель оставила шаблон «P%» вместо числа — % для ставки не посчитать."
         return {
             "probability": None,
-            "stake_percent": None,
-            "recommendation": "Вероятность не определена (исход не найден)",
+            "stake_percent": "ПРОПУСК",
+            "recommendation": hint,
             "status": "invalid",
         }
         

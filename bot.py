@@ -950,6 +950,30 @@ def _extract_contract_field(text: str, patterns: list[str]) -> str:
     return ""
 
 
+def _sanitize_side_summary(text: str) -> str:
+    """Убирает из сводки по команде хвосты с датой/следующими блоками (артефакты regex)."""
+    if not text:
+        return ""
+    t = text.strip()
+    for marker in (
+        "\n📅", "\n🏆", "\n📈", "\n🔢", "\n💰", "\n📋", "\n📝", "\n•", "\n- **",
+        "\n\n",
+    ):
+        i = t.find(marker)
+        if 0 < i < len(t):
+            t = t[:i].strip()
+    for marker in ("📅", "**Дата:**", "Дата матча", "Победитель:", "Прогноз по сч"):
+        i = t.find(marker)
+        if i >= 0:
+            t = t[:i].strip()
+    # «vs соперник» как целая сводка — не аналитика
+    t = re.sub(r"(?i)^vs\.?\s+\S+(?:\s+\S+)?\s*$", "", t).strip()
+    t = re.sub(r"(?i)^vs\.?\s+", "", t).strip()
+    if len(t) > 250:
+        t = t[:247] + "..."
+    return t
+
+
 def format_response_contract(match_text: str, raw_analysis: str, prediction_struct: dict) -> str:
     """
     Format final response as a brief prognosis card.
@@ -972,22 +996,23 @@ def format_response_contract(match_text: str, raw_analysis: str, prediction_stru
     side1_summary = ""
     side2_summary = ""
     if len(sides) == 2:
-        for side_idx, (side, target) in enumerate([(sides[0], "side1_summary"), (sides[1], "side2_summary")]):
+        for side_idx, (side, _target) in enumerate([(sides[0], "side1_summary"), (sides[1], "side2_summary")]):
             escaped = re.escape(side)
+            # Сначала привязка к началу строки / буллету — иначе цеплялось «колорадо» внутри чужого абзаца и дата
             patterns = [
-                rf"\*\*\[?{escaped}\]?\*\*[:\s]*(.+?)(?=\n\s*[•\*\-]|\n\n|\Z)",
-                rf"[•\-]\s*\*\*\[?{escaped}\]?\*\*[:\s]*(.+?)(?=\n\s*[•\*\-]|\n\n|\Z)",
-                rf"{escaped}[:\s]+(.+?)(?=\n|$)",
+                rf"(?m)(?:^|\n)\s*[•\-]\s*\*{{0,2}}\[?{escaped}\]?\*{{0,2}}\s*[:：]\s*(.+?)(?=\n\s*[•\-📈🏆📊📋💰🔢📅]|\n\n|\Z)",
+                rf"(?m)(?:^|\n)\s*\*{{0,2}}\[?{escaped}\]?\*{{0,2}}\s*[:：]\s*(.+?)(?=\n\s*[•\-📈🏆📊📋💰🔢📅]|\n\n|\Z)",
+                rf"(?m)(?:^|\n)\s*📝\s*\*\*\[?{escaped}\]?\*\*\s*[:：]\s*(.+?)(?=\n\s*[•\-📈🏆📊📋💰🔢📅📝]|\n\n|\Z)",
             ]
             for pattern in patterns:
                 m = re.search(pattern, cleaned_analysis, re.I | re.S)
                 if m:
                     text = m.group(1).strip()
-                    # Trim to max 2 sentences
-                    sentences = re.split(r'(?<=[.!?])\s+', text)
-                    text = ' '.join(sentences[:2]).strip()
-                    if len(text) > 250:
-                        text = text[:247] + "..."
+                    sentences = re.split(r"(?<=[.!?])\s+", text)
+                    text = " ".join(sentences[:2]).strip()
+                    text = _sanitize_side_summary(text)
+                    if len(text) < 12:
+                        continue
                     if side_idx == 0:
                         side1_summary = text
                     else:

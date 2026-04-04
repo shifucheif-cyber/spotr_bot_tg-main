@@ -3,7 +3,9 @@ Universal data fetching module for match analysis.
 Handles verification from multiple sources and data extraction.
 """
 
+import contextlib
 import hashlib
+import io
 import logging
 import re
 import requests
@@ -407,31 +409,40 @@ def fetch_match_analysis_data(
     h2h_line = ""
     try:
         if discipline in ("football", "футбол"):
-            from sportsipy.football.teams import Teams
-            teams = list(Teams())
-            t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
-            t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
-            if t1 and t2:
-                t1_goals = [g for g in t1.schedule.dataframe['points_for'][-5:]]
-                t2_goals = [g for g in t2.schedule.dataframe['points_for'][-5:]]
-                avg_total = (sum(t1_goals) + sum(t2_goals)) / (len(t1_goals) + len(t2_goals))
-                total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
-                h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
-                if not h2h.empty:
-                    h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['points_for'].sum()}:{h2h['points_against'].sum()} по голам"
+            try:
+                from sportsipy.football.teams import Teams
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    teams = list(Teams())
+                t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
+                t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
+                if t1 and t2:
+                    t1_goals = [g for g in t1.schedule.dataframe['points_for'][-5:]]
+                    t2_goals = [g for g in t2.schedule.dataframe['points_for'][-5:]]
+                    avg_total = (sum(t1_goals) + sum(t2_goals)) / (len(t1_goals) + len(t2_goals))
+                    total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
+                    h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
+                    if not h2h.empty:
+                        h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['points_for'].sum()}:{h2h['points_against'].sum()} по голам"
+            except Exception as e:
+                logger.debug("sportsipy football stats skipped: %s", e)
         elif discipline in ("hockey", "хоккей"):
-            from sportsipy.nhl.teams import Teams as NHLTeams
-            teams = list(NHLTeams())
-            t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
-            t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
-            if t1 and t2:
-                t1_goals = [g for g in t1.schedule.dataframe['goals_for'][-5:]]
-                t2_goals = [g for g in t2.schedule.dataframe['goals_for'][-5:]]
-                avg_total = (sum(t1_goals) + sum(t2_goals)) / (len(t1_goals) + len(t2_goals))
-                total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
-                h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
-                if not h2h.empty:
-                    h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['goals_for'].sum()}:{h2h['goals_against'].sum()} по шайбам"
+            try:
+                from sportsipy.nhl.teams import Teams as NHLTeams
+                # sportsipy печатает в stdout предупреждение про sports-reference, если сезона/данных нет
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    teams = list(NHLTeams())
+                t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
+                t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
+                if t1 and t2:
+                    t1_goals = [g for g in t1.schedule.dataframe['goals_for'][-5:]]
+                    t2_goals = [g for g in t2.schedule.dataframe['goals_for'][-5:]]
+                    avg_total = (sum(t1_goals) + sum(t2_goals)) / (len(t1_goals) + len(t2_goals))
+                    total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
+                    h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
+                    if not h2h.empty:
+                        h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['goals_for'].sum()}:{h2h['goals_against'].sum()} по шайбам"
+            except Exception as e:
+                logger.debug("sportsipy NHL stats skipped: %s", e)
         elif discipline in ("cs2", "csgo", "counter-strike 2"):
             try:
                 from hltv import HLTV
@@ -449,7 +460,8 @@ def fetch_match_analysis_data(
         elif discipline in ("basketball", "баскетбол"):
             try:
                 from sportsipy.nba.teams import Teams as NBATeams
-                teams = list(NBATeams())
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    teams = list(NBATeams())
                 t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
                 t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
                 if t1 and t2:
