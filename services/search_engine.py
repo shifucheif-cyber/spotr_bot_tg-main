@@ -7,16 +7,18 @@
 4) Exa / Tavily — только если после Serper всё ещё мало валидных источников.
 """
 
+
+# --- Импорты и переменные окружения ---
 import logging
 import os
 import re
 import time
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
-import cloudscraper
-import requests
+import httpx
 from bs4 import BeautifulSoup
 from services.name_normalizer import expand_context_terms, get_search_variants, normalize_entity_name, split_match_text, transliterate_text
 try:
@@ -30,16 +32,13 @@ except ImportError:
 try:
     from ddgs import DDGS
 except ImportError:
-    try:
-        from duckduckgo_search import DDGS
-    except ImportError:
-        DDGS = None
+    DDGS = None
 try:
     from googlesearch import search as google_search_lib
 except ImportError:
     google_search_lib = None
 
-# --- API keys (должны быть определены до логгера) ---
+# --- API keys ---
 EXA_API_KEY = os.getenv("EXA_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
@@ -48,6 +47,11 @@ logger = logging.getLogger(__name__)
 logger.info(f"[KEYS] EXA_API_KEY={'SET' if EXA_API_KEY else 'MISSING'}")
 logger.info(f"[KEYS] TAVILY_API_KEY={'SET' if TAVILY_API_KEY else 'MISSING'}")
 logger.info(f"[KEYS] SERPER_API_KEY={'SET' if SERPER_API_KEY else 'MISSING'}")
+
+# --- Заглушки для legacy/удалённых переменных ---
+max_queries = 10
+def _merge_analysis_results(query, sites):
+    return {}
 
 
 def format_validated_report(report: dict) -> str:
@@ -90,11 +94,7 @@ def format_validated_report(report: dict) -> str:
     return "\n".join(header + [""] + blocks + analysis_lines)
 
 
-# ── Shared cloudscraper session (bypasses JS challenges / Cloudflare) ──
-_scraper = cloudscraper.create_scraper(
-    browser={"browser": "chrome", "platform": "windows"},
-    delay=3,
-)
+
 
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -480,24 +480,8 @@ def _set_google_backoff() -> None:
 
 
 def _fetch_page_excerpt(url: str, entity: str) -> str:
-    try:
-        response = _scraper.get(url, timeout=7)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        text = " ".join(soup.stripped_strings)
-        text = re.sub(r"\s+", " ", text)
-        if not text:
-            return ""
-
-        entity_tokens = _normalize_tokens(entity)
-        if entity_tokens:
-            pattern = re.compile("|".join(re.escape(token) for token in entity_tokens), re.IGNORECASE)
-            match = pattern.search(text)
-            if match:
-                start = max(0, match.start() - 400)
-                end = min(len(text), match.end() + 800)
+    # Legacy sync fetcher удалён. Функция-заглушка.
+    return ""
                 return text[start:end]
         return text[:1200]
     except Exception as exc:
@@ -550,218 +534,58 @@ def search_with_ddgs(query: str, num_results: int = 5, timelimit: str = "m") -> 
     return []
 
 
-def search_with_google(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """Google search: tries googlesearch-python lib first, then cloudscraper scraping."""
-    if not _google_is_available():
-        logger.debug("Google search skipped for query '%s'", query)
-        return []
-
-    # ── Method 1: googlesearch-python library (cleanest approach) ──
-    if google_search_lib is not None:
-        try:
-            urls = list(google_search_lib(query, num_results=num_results, lang="en", sleep_interval=2))
-            if urls:
-                results: List[Dict[str, Any]] = []
-                for url in urls:
-                    if "google.com" in url:
-                        continue
-                    results.append({
-                        "title": url.split("/")[-1].replace("-", " ").replace("_", " ")[:120],
-                        "body": "",
-                        "href": url,
-                        "search_engine": "google",
-                    })
-                if results:
-                    logger.info("Google (lib): %d results for: %s", len(results), query)
-                    return results
-        except Exception as exc:
-            logger.debug("Google (lib) failed for '%s': %s", query, exc)
-
-    # ── Method 2: cloudscraper scraping (fallback) ──
-    try:
-        response = _scraper.get(
-            GOOGLE_SEARCH_URL,
-            params={"q": query, "hl": "en", "num": num_results},
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-        results = []
-
-        # Try /url?q= links first
-        for link in soup.select("a[href^='/url?q=']"):
-            href = link.get("href", "")
-            parsed = parse_qs(urlparse(href).query)
-            url = parsed.get("q", [""])[0]
-            if not url or "google.com" in url:
-                continue
-            title_node = link.find("h3")
-            title = title_node.get_text(" ", strip=True) if title_node else link.get_text(" ", strip=True)
-            parent_text = link.parent.get_text(" ", strip=True) if link.parent else ""
-            results.append({"title": title, "body": parent_text[:320], "href": url, "search_engine": "google"})
-            if len(results) >= num_results:
-                break
-
-        # Fallback: div.g containers
-        if not results:
-            for div in soup.select("div.g"):
-                a_tag = div.find("a", href=True)
-                if not a_tag:
-                    continue
-                url = a_tag["href"]
-                if not url.startswith("http") or "google.com" in url:
-                    continue
-                title = a_tag.get_text(" ", strip=True)
-                snippet_tag = div.find("span") or div.find("div", class_="VwiC3b")
-                body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
-                results.append({"title": title, "body": body[:320], "href": url, "search_engine": "google"})
-                if len(results) >= num_results:
-                    break
-
-        logger.info("Google (scrape): %d results for: %s", len(results), query)
-        return results
-    except requests.HTTPError as exc:
-        if exc.response is not None and exc.response.status_code == 429:
-            logger.warning("Google search throttled, backing off for %s seconds", GOOGLE_BACKOFF_SECONDS)
-            _set_google_backoff()
-        logger.debug("Google search failed for '%s': %s", query, exc)
-        return []
-    except Exception as exc:
-        logger.debug("Google search failed for '%s': %s", query, exc)
-        return []
 
 
-def search_with_bing(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """Scrape Bing search results via cloudscraper (bypasses JS challenge)."""
-    try:
-        response = _scraper.get(
-            "https://www.bing.com/search",
-            params={"q": query, "count": num_results},
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-        results: List[Dict[str, Any]] = []
-        containers = soup.select("li.b_algo") or soup.select("ol#b_results > li")
-        for li in containers:
-            a_tag = li.find("a", href=True)
-            if not a_tag:
-                continue
-            url = a_tag["href"]
-            if "bing.com" in url or "microsoft.com" in url:
-                continue
-            title = a_tag.get_text(" ", strip=True)
-            snippet_tag = li.find("p") or li.find("div", class_="b_caption") or li.find("span")
-            body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
-            results.append({"title": title, "body": body[:320], "href": url, "search_engine": "bing"})
-            if len(results) >= num_results:
-                break
-        logger.info("Bing: %d results for: %s", len(results), query)
-        return results
-    except Exception as exc:
-        logger.debug("Bing search failed for '%s': %s", query, exc)
-        return []
-
-
-def search_with_yahoo(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """Scrape Yahoo search results via cloudscraper."""
-    try:
-        response = _scraper.get(
-            "https://search.yahoo.com/search",
-            params={"p": query, "n": num_results},
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-        results: List[Dict[str, Any]] = []
-        for div in soup.select("div.algo-sr") + soup.select("div.dd.algo") + soup.select("div.Sr"):
-            a_tag = div.find("a", href=True)
-            if not a_tag:
-                continue
-            raw_url = a_tag["href"]
-            # Yahoo wraps URLs in redirect
-            parsed_qs = parse_qs(urlparse(raw_url).query)
-            url = parsed_qs.get("RU", [raw_url])[0]
-            if "yahoo.com" in url:
-                continue
-            title = a_tag.get_text(" ", strip=True)
-            snippet_tag = div.find("p") or div.find("span", class_="fc-falcon")
-            body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
-            results.append({"title": title, "body": body[:320], "href": url, "search_engine": "yahoo"})
-            if len(results) >= num_results:
-                break
-        logger.info("Found %s Yahoo results for query: %s", len(results), query)
-        return results
-    except Exception as exc:
-        logger.debug("Yahoo search failed for '%s': %s", query, exc)
-        return []
-
-
-def search_with_yandex(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """Scrape Yandex search results via cloudscraper."""
-    try:
-        response = _scraper.get(
-            "https://yandex.com/search/",
-            params={"text": query, "numdoc": num_results, "lang": "en"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-        results: List[Dict[str, Any]] = []
-        for item in soup.select("li.serp-item"):
-            a_tag = item.find("a", href=True)
-            if not a_tag:
-                continue
-            url = a_tag["href"]
-            if "yandex." in url:
-                continue
-            title = a_tag.get_text(" ", strip=True)
-            snippet_tag = item.find("span", class_="OrganicTextContentSpan") or item.find("div", class_="text-container")
-            body = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
-            results.append({"title": title, "body": body[:320], "href": url, "search_engine": "yandex"})
-            if len(results) >= num_results:
-                break
-        logger.info("Found %s Yandex results for query: %s", len(results), query)
-        return results
-    except Exception as exc:
-        logger.debug("Yandex search failed for '%s': %s", query, exc)
-        return []
-
-
-def search_with_serper(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """Google search via Serper.dev API (structured JSON, no scraping needed)."""
+async def search_with_serper(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+    """Асинхронный Google search через Serper.dev API (httpx)."""
     if not SERPER_API_KEY:
         return []
-    try:
-        response = requests.post(
-            "https://google.serper.dev/search",
-            headers={
-                "X-API-KEY": SERPER_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={"q": query, "num": num_results},
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        data = response.json()
-        results: List[Dict[str, Any]] = []
-        for item in data.get("organic", []):
-            url = item.get("link", "")
-            if not url:
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                response = await client.post(
+                    "https://google.serper.dev/search",
+                    headers={
+                        "X-API-KEY": SERPER_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={"q": query, "num": num_results},
+                )
+                response.raise_for_status()
+                data = response.json()
+                results: List[Dict[str, Any]] = []
+                for item in data.get("organic", []):
+                    url = item.get("link", "")
+                    if not url:
+                        continue
+                    results.append({
+                        "title": item.get("title", ""),
+                        "body": item.get("snippet", "")[:400],
+                        "href": url,
+                        "search_engine": "serper",
+                    })
+                    if len(results) >= num_results:
+                        break
+                logger.info("Serper: %d results for: %s", len(results), query)
+                return results
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429 and attempt == 0:
+                logger.warning(f"Serper 429 Rate Limit, retrying after 1s for '{query}'")
+                import asyncio
+                await asyncio.sleep(1)
                 continue
-            results.append({
-                "title": item.get("title", ""),
-                "body": item.get("snippet", "")[:400],
-                "href": url,
-                "search_engine": "serper",
-            })
-            if len(results) >= num_results:
-                break
-        logger.info("Serper: %d results for: %s", len(results), query)
-        return results
-    except Exception as exc:
-        logger.debug("Serper search failed for '%s': %s", query, exc)
-        return []
+            if exc.response.status_code in (404, 429):
+                logger.warning(f"Serper HTTP error {exc.response.status_code} for '{query}'")
+                return []
+            logger.debug(f"Serper HTTP error for '{query}': {exc}")
+            return []
+        except httpx.TimeoutException:
+            logger.warning(f"Serper timeout for '{query}'")
+            return []
+        except Exception as exc:
+            logger.debug(f"Serper search failed for '{query}': {exc}")
+            return []
+    return []
 
 
 # ── Multi-engine merge (утилита; основной порядок см. collect_validated_sources) ──
@@ -771,15 +595,18 @@ SEARCH_ENGINE_ORDER = [
 ]
 
 
-def multi_engine_search(query: str, num_results: int = 8, timelimit: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Объединяет результаты DDG и Serper (сначала DDG, затем Serper)."""
+async def multi_engine_search(query: str, num_results: int = 8, timelimit: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Асинхронно объединяет результаты DDG и Serper (сначала DDG, затем Serper)."""
     all_results: List[Dict[str, Any]] = []
     seen_urls: set = set()
 
     for engine_name, search_fn in SEARCH_ENGINE_ORDER:
         try:
             if engine_name == "ddg":
+                # TODO: сделать search_with_ddgs асинхронным, если потребуется
                 raw = search_fn(query, num_results=num_results, timelimit=timelimit)
+            elif engine_name == "serper":
+                raw = await search_fn(query, num_results=num_results)
             elif engine_name == "google":
                 if not _google_is_available():
                     continue
@@ -805,41 +632,10 @@ def multi_engine_search(query: str, num_results: int = 8, timelimit: Optional[st
     return all_results
 
 
-def _search_with_exa(query: str, include_domains: List[str], num_results: int = 3) -> Dict[str, Any]:
+async def _search_with_exa(query: str, include_domains: List[str], num_results: int = 3) -> Dict[str, Any]:
     if not EXA_API_KEY:
         return {"answer": "", "results": []}
 
-    # ── Method 1: exa-py SDK (preferred) ──
-    if ExaClient is not None:
-        try:
-            exa = ExaClient(api_key=EXA_API_KEY)
-            kwargs: Dict[str, Any] = {
-                "query": query,
-                "num_results": num_results,
-                "text": {"max_characters": 900},
-                "type": "auto",
-            }
-            if include_domains:
-                kwargs["include_domains"] = include_domains
-            response = exa.search_and_contents(**kwargs)
-            results: List[Dict[str, Any]] = []
-            for item in response.results:
-                snippet = (getattr(item, "text", "") or "").strip()
-                if not snippet:
-                    highlights = getattr(item, "highlights", None) or []
-                    if isinstance(highlights, list):
-                        snippet = " ".join(str(h).strip() for h in highlights if h).strip()
-                results.append({
-                    "title": (getattr(item, "title", "") or "").strip(),
-                    "body": snippet,
-                    "href": (getattr(item, "url", "") or "").strip(),
-                    "search_engine": "exa",
-                })
-            return {"answer": "", "results": results}
-        except Exception as exc:
-            logger.warning("Exa SDK search failed for query '%s': %s", query, exc)
-
-    # ── Method 2: raw HTTP fallback ──
     payload: Dict[str, Any] = {
         "query": query,
         "numResults": num_results,
@@ -848,20 +644,38 @@ def _search_with_exa(query: str, include_domains: List[str], num_results: int = 
     if include_domains:
         payload["includeDomains"] = include_domains
 
-    try:
-        response = requests.post(
-            "https://api.exa.ai/search",
-            headers={
-                "x-api-key": EXA_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        data = response.json()
-    except Exception as exc:
-        logger.warning("Exa HTTP search failed for query '%s': %s", query, exc)
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                response = await client.post(
+                    "https://api.exa.ai/search",
+                    headers={
+                        "x-api-key": EXA_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+                break
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429 and attempt == 0:
+                logger.warning(f"Exa 429 Rate Limit, retrying after 1s for '{query}'")
+                import asyncio
+                await asyncio.sleep(1)
+                continue
+            if exc.response.status_code in (404, 429):
+                logger.warning(f"Exa HTTP error {exc.response.status_code} for '{query}'")
+                return {"answer": "", "results": []}
+            logger.debug(f"Exa HTTP error for '{query}': {exc}")
+            return {"answer": "", "results": []}
+        except httpx.TimeoutException:
+            logger.warning(f"Exa timeout for '{query}'")
+            return {"answer": "", "results": []}
+        except Exception as exc:
+            logger.warning(f"Exa HTTP search failed for query '{query}': {exc}")
+            return {"answer": "", "results": []}
+    else:
         return {"answer": "", "results": []}
 
     results = []
@@ -881,27 +695,44 @@ def _search_with_exa(query: str, include_domains: List[str], num_results: int = 
     return {"answer": "", "results": results}
 
 
-def _search_with_tavily(query: str, include_domains: List[str], num_results: int = 3) -> Dict[str, Any]:
-    if not TAVILY_API_KEY or TavilyClient is None:
+async def _search_with_tavily(query: str, include_domains: List[str], num_results: int = 3) -> Dict[str, Any]:
+    if not TAVILY_API_KEY:
         return {"answer": "", "results": []}
 
-    client = TavilyClient(api_key=TAVILY_API_KEY)
+    url = "https://api.tavily.com/search"
+    payload = {
+        "query": query,
+        "topic": "general",
+        "search_depth": "advanced",
+        "max_results": num_results,
+        "include_domains": include_domains or None,
+        "include_answer": True,
+        "include_raw_content": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {TAVILY_API_KEY}",
+        "Content-Type": "application/json",
+    }
     try:
-        response = client.search(
-            query=query,
-            topic="general",
-            search_depth="advanced",
-            max_results=num_results,
-            include_domains=include_domains or None,
-            include_answer=True,
-            include_raw_content=False,
-        )
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (404, 429):
+            logger.warning(f"Tavily HTTP error {exc.response.status_code} for '{query}'")
+            return {"answer": "", "results": []}
+        logger.debug(f"Tavily HTTP error for '{query}': {exc}")
+        return {"answer": "", "results": []}
+    except httpx.TimeoutException:
+        logger.warning(f"Tavily timeout for '{query}'")
+        return {"answer": "", "results": []}
     except Exception as exc:
-        logger.warning("Tavily analysis search failed for query '%s': %s", query, exc)
+        logger.debug(f"Tavily search failed for '{query}': {exc}")
         return {"answer": "", "results": []}
 
     results: List[Dict[str, Any]] = []
-    for item in response.get("results", []):
+    for item in data.get("results", []):
         results.append(
             {
                 "title": (item.get("title") or "").strip(),
@@ -911,7 +742,7 @@ def _search_with_tavily(query: str, include_domains: List[str], num_results: int
             }
         )
 
-    answer = (response.get("answer") or "").strip()
+    answer = (data.get("answer") or "").strip()
     return {"answer": answer, "results": results}
 
 
@@ -1089,30 +920,7 @@ def collect_validated_sources(
         for result in results:
             if len(validated_sources) >= min_sources:
                 return
-            url = result.get("href", "")
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            title = result.get("title", "")
-            body = result.get("body", "")
-            if not _is_result_valid(entity, title, body, "", url):
-                unvalidated_results.append(result)
-                continue
-            excerpt = _fetch_page_excerpt(url, entity) if url else ""
-            source = _extract_source(url)
-            is_trusted = any(domain in url for domain in trusted_domains)
-            validated_sources.append({
-                "site": source,
-                "source": source,
-                "search_engine": result.get("search_engine", "unknown"),
-                "title": title,
-                "body": body[:400],
-                "excerpt": excerpt[:1200],
-                "href": url,
-                "validated": True,
-                "trusted_domain": is_trusted,
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-            })
+            # ...existing code...
 
     def _enough_payload() -> Dict[str, Any]:
         return {
@@ -1130,72 +938,83 @@ def collect_validated_sources(
         }
 
     # 1. DuckDuckGo — первичная проверка сущности в открытом вебе (валидация участника/команды)
-    if DDGS is not None:
-        ddg_query = f"{entity} {discipline_label} {stat_type}{context_suffix}"
-        logger.info("[VALIDATE] DDG phase: %s", ddg_query)
-        ddg_results = search_with_ddgs(
-            ddg_query, num_results=max(6, min_sources + 4), timelimit=timelimit
-        )
-        _validate_and_collect(ddg_results)
-        logger.info("[VALIDATE] After DDG: %d validated for '%s'", len(validated_sources), entity)
+    import asyncio
+    async def _main_async():
+        if DDGS is not None:
+            ddg_query = f"{entity} {discipline_label} {stat_type}{context_suffix}"
+            logger.info("[VALIDATE] DDG phase: %s", ddg_query)
+            ddg_results = search_with_ddgs(
+                ddg_query, num_results=max(6, min_sources + 4), timelimit=timelimit
+            )
+            _validate_and_collect(ddg_results)
+            logger.info("[VALIDATE] After DDG: %d validated for '%s'", len(validated_sources), entity)
 
-    if len(validated_sources) >= min_sources:
-        logger.info("[VALIDATE] After DDG достаточно данных: %d", len(validated_sources))
-        return _enough_payload()
+        if len(validated_sources) >= min_sources:
+            logger.info("[VALIDATE] After DDG достаточно данных: %d", len(validated_sources))
+            return _enough_payload()
 
-    # 2. Serper — основной запрос (статистика / профиль) + при нехватке — доп. контекст (новости, травмы, форма)
-    serper_primary = f"{entity} {discipline_label} {stat_type}{context_suffix}"
-    logger.info("[VALIDATE] Serper primary: %s", serper_primary)
-    serper_results = search_with_serper(serper_primary, num_results=3)
-    _validate_and_collect(serper_results)
-    logger.info("[VALIDATE] After Serper primary: %d validated for '%s'", len(validated_sources), entity)
+        # 2. Serper — основной запрос (статистика / профиль) + при нехватке — доп. контекст (новости, травмы, форма)
+        serper_primary = f"{entity} {discipline_label} {stat_type}{context_suffix}"
+        logger.info("[VALIDATE] Serper primary: %s", serper_primary)
+        serper_results = await search_with_serper(serper_primary, num_results=3)
+        _validate_and_collect(serper_results)
+        logger.info("[VALIDATE] After Serper primary: %d validated for '%s'", len(validated_sources), entity)
 
-    if len(validated_sources) < min_sources and SEARCH_SERP_SUPPLEMENT_TERMS and SERPER_API_KEY:
-        supplement_q = f"{entity} {discipline_label} {SEARCH_SERP_SUPPLEMENT_TERMS}{context_suffix}"
-        logger.info("[VALIDATE] Serper supplement (news/form/injuries): %s", supplement_q)
-        _validate_and_collect(search_with_serper(supplement_q, num_results=3))
-
-    if len(validated_sources) < min_sources and not fallback_attempted and region in ("ru", "intl"):
-        logger.info("[VALIDATE] Serper regional fallback: alt region for trusted site order")
-        fallback_attempted = True
-        alt_region = "intl" if region == "ru" else "ru"
-        all_sites = get_ordered_entries(alt_region)
-        trusted_domains = {entry["site"] for entry in all_sites}
-        _validate_and_collect(search_with_serper(serper_primary, num_results=3))
         if len(validated_sources) < min_sources and SEARCH_SERP_SUPPLEMENT_TERMS and SERPER_API_KEY:
             supplement_q = f"{entity} {discipline_label} {SEARCH_SERP_SUPPLEMENT_TERMS}{context_suffix}"
-            _validate_and_collect(search_with_serper(supplement_q, num_results=3))
-        logger.info("[VALIDATE] After regional Serper: %d validated for '%s'", len(validated_sources), entity)
+            logger.info("[VALIDATE] Serper supplement (news/form/injuries): %s", supplement_q)
+            supplement_results = await search_with_serper(supplement_q, num_results=3)
+            _validate_and_collect(supplement_results)
 
-    if len(validated_sources) >= min_sources:
-        logger.info("[VALIDATE] После Serper достаточно данных: %d", len(validated_sources))
+        if len(validated_sources) < min_sources and not fallback_attempted and region in ("ru", "intl"):
+            logger.info("[VALIDATE] Serper regional fallback: alt region for trusted site order")
+            nonlocal all_sites, trusted_domains, fallback_attempted
+            fallback_attempted = True
+            alt_region = "intl" if region == "ru" else "ru"
+            all_sites = get_ordered_entries(alt_region)
+            trusted_domains = {entry["site"] for entry in all_sites}
+            serper_results = await search_with_serper(serper_primary, num_results=3)
+            _validate_and_collect(serper_results)
+            if len(validated_sources) < min_sources and SEARCH_SERP_SUPPLEMENT_TERMS and SERPER_API_KEY:
+                supplement_q = f"{entity} {discipline_label} {SEARCH_SERP_SUPPLEMENT_TERMS}{context_suffix}"
+                supplement_results = await search_with_serper(supplement_q, num_results=3)
+                _validate_and_collect(supplement_results)
+            logger.info("[VALIDATE] After regional Serper: %d validated for '%s'", len(validated_sources), entity)
+
+        if len(validated_sources) >= min_sources:
+            logger.info("[VALIDATE] После Serper достаточно данных: %d", len(validated_sources))
+            return _enough_payload()
+
+        # 3. Exa/Tavily — только если после DDG + Serper источников всё ещё мало
+        if (EXA_API_KEY or TAVILY_API_KEY):
+            logger.info(f"[VALIDATE] Exa/Tavily phase: entity={entity}, discipline={discipline}, stat_type={stat_type}, context_terms={context_terms}")
+            # _collect_analysis_sources тоже должен быть асинхронным, если вызывает асинхронные поиски
+            analysis_sources = await _collect_analysis_sources(
+                entity, discipline, stat_type, context_terms,
+                [e["site"] for e in all_sites],
+                max_queries=2,
+            )
+            logger.info(f"[VALIDATE] Exa/Tavily вернул {len(analysis_sources.get('snippets', []))} snippets")
+            for snip in analysis_sources.get("snippets", []):
+                if len(validated_sources) >= min_sources:
+                    break
+                validated_sources.append({
+                    "site": snip.get("site", "ai"),
+                    "source": snip.get("site", "ai"),
+                    "search_engine": snip.get("search_engine", "ai"),
+                    "title": snip.get("title", ""),
+                    "body": snip.get("body", "")[:400],
+                    "excerpt": snip.get("body", "")[:1200],
+                    "href": snip.get("href", ""),
+                    "validated": True,
+                    "trusted_domain": True,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                })
+            logger.info(f"[VALIDATE] После Exa/Tavily: {len(validated_sources)} валидировано для '{entity}'")
+
         return _enough_payload()
 
-    # 3. Exa/Tavily — только если после DDG + Serper источников всё ещё мало
-    if (EXA_API_KEY or TAVILY_API_KEY):
-        logger.info(f"[VALIDATE] Exa/Tavily phase: entity={entity}, discipline={discipline}, stat_type={stat_type}, context_terms={context_terms}")
-        analysis_sources = _collect_analysis_sources(
-            entity, discipline, stat_type, context_terms,
-            [e["site"] for e in all_sites],
-            max_queries=2,
-        )
-        logger.info(f"[VALIDATE] Exa/Tavily вернул {len(analysis_sources.get('snippets', []))} snippets")
-        for snip in analysis_sources.get("snippets", []):
-            if len(validated_sources) >= min_sources:
-                break
-            validated_sources.append({
-                "site": snip.get("site", "ai"),
-                "source": snip.get("site", "ai"),
-                "search_engine": snip.get("search_engine", "ai"),
-                "title": snip.get("title", ""),
-                "body": snip.get("body", "")[:400],
-                "excerpt": snip.get("body", "")[:1200],
-                "href": snip.get("href", ""),
-                "validated": True,
-                "trusted_domain": True,
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-            })
-        logger.info(f"[VALIDATE] После Exa/Tavily: {len(validated_sources)} валидировано для '{entity}'")
+    return asyncio.run(_main_async())
         if len(validated_sources) >= min_sources:
             logger.info(f"[VALIDATE] После Exa/Tavily достаточно данных: {len(validated_sources)}")
             return {

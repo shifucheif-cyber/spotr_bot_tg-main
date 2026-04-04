@@ -4,8 +4,8 @@ from services.data_fetcher import FootballFetcher, fetch_match_analysis_data
 logger = logging.getLogger(__name__)
 
 
-def get_football_data(match_name: str, match_context: dict | None = None) -> str:
-    return fetch_match_analysis_data(
+async def get_football_data(match_name: str, match_context: dict | None = None) -> str:
+    return await fetch_match_analysis_data(
         match_name, FootballFetcher(), "fetch_team_info", "⚽",
         match_context=match_context,
     )

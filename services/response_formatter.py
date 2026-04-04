@@ -1,3 +1,34 @@
+def validate_prediction_consistency(prediction_struct: dict, team1: str = None, team2: str = None) -> None:
+    """
+    Корректирует exact_score в зависимости от winner и вероятности.
+    Если winner — команда 1, а в exact_score голов у команды 2 больше, меняет местами.
+    Если вероятность победы > 60%, а счет ничейный — пишет в лог предупреждение.
+    Модифицирует prediction_struct in-place.
+    """
+    exact_score = prediction_struct.get("exact_score")
+    winner = prediction_struct.get("winner")
+    prob = prediction_struct.get("win_probability_team1")
+    # Определяем ничью
+    is_draw = False
+    if isinstance(exact_score, str):
+        m = re.match(r"(\d+):(\d+)", exact_score)
+        if m:
+            g1, g2 = int(m.group(1)), int(m.group(2))
+            if g1 == g2:
+                is_draw = True
+            # winner: если победитель — команда 1, а голов у нее меньше, меняем счет
+            if winner and team1 and team2:
+                if winner.strip().lower() == team2.strip().lower() and g1 > g2:
+                    prediction_struct["exact_score"] = f"{g2}:{g1}"
+                elif winner.strip().lower() == team1.strip().lower() and g2 > g1:
+                    prediction_struct["exact_score"] = f"{g2}:{g1}"
+    # Если вероятность победы > 60%, а счет ничейный
+    try:
+        prob_val = float(prob) if prob is not None else None
+        if prob_val is not None and prob_val > 60 and is_draw:
+            logger.warning("Высокая вероятность победы (%.1f%%), но счет ничейный: %s", prob_val, exact_score)
+    except Exception:
+        pass
 import re
 import json
 import logging
@@ -40,6 +71,15 @@ def _sanitize_side_summary(text: str) -> str:
 def format_response_contract(match_text: str, raw_analysis: str, prediction_struct: dict) -> str:
 
     # --- Новые поля: точный счет, тотал, рекомендации ---
+    # Получаем имена команд (если возможно)
+    team1, team2 = None, None
+    try:
+        teams = split_match_text(match_text)
+        if len(teams) == 2:
+            team1, team2 = teams
+    except Exception:
+        pass
+    validate_prediction_consistency(prediction_struct, team1, team2)
     exact_score = prediction_struct.get("exact_score", "Н/Д")
     total_prediction = prediction_struct.get("total_prediction", "Н/Д")
     total_recommendation = prediction_struct.get("total_recommendation", "Н/Д")

@@ -10,3 +10,9 @@ def get_mma_data(fight_name: str, subdiscipline: str = "mma", match_context: dic
         fight_name, MMAFetcher(subdiscipline), "fetch_fighter_info", emoji,
         match_context=match_context,
     )
+async def get_mma_data(fight_name: str, subdiscipline: str = "mma", match_context: dict | None = None) -> str:
+    emoji = "🥊" if subdiscipline == "boxing" else "🥋"
+    return await fetch_match_analysis_data(
+        fight_name, MMAFetcher(subdiscipline), "fetch_fighter_info", emoji,
+        match_context=match_context,
+    )

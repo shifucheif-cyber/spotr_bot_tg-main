@@ -8,7 +8,7 @@ import hashlib
 import io
 import logging
 import re
-import requests
+import httpx
 import threading
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
@@ -79,8 +79,7 @@ class DataFetcher:
     """Base class for fetching match data from various sources."""
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
+        self.session = None  # requests.Session() удалён, не используется
 
     def build_validated_payload(
         self,
@@ -488,14 +487,14 @@ def fetch_match_analysis_data(
     fetch_fn = getattr(fetcher, fetch_method)
     try:
         logger.info(f"[FETCH] Запрос данных для side1: {side1}")
-        data1 = fetch_fn(side1, context_terms=ctx1)
+        data1 = await fetch_fn(side1, context_terms=ctx1)
         logger.info(f"[FETCH] Данные side1 получены: {bool(data1)}")
     except Exception as e:
         logger.error("[FETCH] Fetch failed for %s: %s", side1, e)
         data1 = None
     try:
         logger.info(f"[FETCH] Запрос данных для side2: {side2}")
-        data2 = fetch_fn(side2, context_terms=ctx2)
+        data2 = await fetch_fn(side2, context_terms=ctx2)
         logger.info(f"[FETCH] Данные side2 получены: {bool(data2)}")
     except Exception as e:
         logger.error("[FETCH] Fetch failed for %s: %s", side2, e)

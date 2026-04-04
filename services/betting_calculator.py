@@ -1,3 +1,14 @@
+def normalize_score(raw_score: str) -> str:
+    """
+    Приводит счет к формату X:Y, поддерживает 2:1, 2-1, 2 1 и т.д.
+    Если не найдено — возвращает "Н/Д".
+    """
+    if not isinstance(raw_score, str):
+        return "Н/Д"
+    m = re.search(r"(\d+)[:\-\s](\d+)", raw_score)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}"
+    return "Н/Д"
 """Betting recommendation calculator using Kelly Criterion and Value Betting"""
 import re
 import json
@@ -98,10 +109,7 @@ def extract_betting_data(llm_response: str) -> dict:
             result["analysis_summary"] = data.get("analysis_summary")
             # exact_score
             exact_score = data.get("exact_score")
-            if isinstance(exact_score, str) and ":" in exact_score:
-                result["exact_score"] = exact_score
-            else:
-                result["exact_score"] = "Н/Д"
+            result["exact_score"] = normalize_score(exact_score)
             # total_prediction (float из строки или числа)
             total_pred = data.get("total_prediction")
             if isinstance(total_pred, (int, float)):

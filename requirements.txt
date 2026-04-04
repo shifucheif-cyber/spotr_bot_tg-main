@@ -1,14 +1,16 @@
 aiogram
 pytz
+httpx>=0.24.0
+pytz
 google-genai
 groq
 openai
 hltv
 python-dotenv
-requests
+	# requests removed
 beautifulsoup4
 lxml
-cloudscraper
+	# cloudscraper removed
 ddgs
 tavily-python
 exa-py
