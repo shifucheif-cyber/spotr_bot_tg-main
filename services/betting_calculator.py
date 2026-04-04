@@ -1,4 +1,4 @@
-﻿"""Betting recommendation calculator using Kelly Criterion and Value Betting"""
+"""Betting recommendation calculator using Kelly Criterion and Value Betting"""
 import re
 import json
 

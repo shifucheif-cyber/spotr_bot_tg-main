@@ -1,4 +1,4 @@
-﻿import pytz
+import pytz
 from datetime import datetime, timedelta, timezone
 import os
 import datetime as datetime_module
