@@ -25,7 +25,10 @@ def search_event_thesportsdb(match_name: str) -> dict | None:
         logging.warning("TheSportsDB timeout for '%s': %s", match_name, e)
         return None
     except requests.HTTPError as e:
-        logging.warning("TheSportsDB HTTP error for '%s': %s", match_name, e)
+        if e.response.status_code == 404:
+            logging.debug("TheSportsDB API endpoint unavailable (404) for '%s'", match_name)
+        else:
+            logging.warning("TheSportsDB HTTP error for '%s': %s", match_name, e)
         return None
     except (ValueError, KeyError) as e:
         logging.warning("TheSportsDB parse error for '%s': %s", match_name, e)

@@ -97,7 +97,7 @@ def format_response_contract(match_text: str, raw_analysis: str, prediction_stru
         lines.append("")
     lines += [
         f"🏆 **Победитель:** {winner or '?'}",
-        f"📈 **Вероятность:** {prob_text}",
+        f"📈 **Вероятность (1-й команды):** {prob_text}",
         f"🔢 **Счёт:** {score or '?'}",
         f"💰 **Ставка:** {stake_text}",
         f"💡 {prediction_struct.get('recommendation', '')}",
