@@ -38,6 +38,7 @@ def format_validated_report(report: dict) -> str:
     return "\n".join(header + [""] + blocks + analysis_lines)
 """Search and validation helpers for multi-source sports data collection."""
 
+
 import logging
 import os
 import re
@@ -70,6 +71,10 @@ try:
 except ImportError:
     google_search_lib = None
 
+# --- API keys (должны быть определены до логгера) ---
+EXA_API_KEY = os.getenv("EXA_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 logger = logging.getLogger(__name__)
 logger.info(f"[KEYS] EXA_API_KEY={'SET' if EXA_API_KEY else 'MISSING'}")
