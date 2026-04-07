@@ -3,9 +3,8 @@ Universal data fetching module for match analysis.
 Handles verification from multiple sources and data extraction.
 """
 
-import contextlib
+import asyncio
 import hashlib
-import io
 import logging
 import re
 import httpx
@@ -35,7 +34,7 @@ logger = logging.getLogger(__name__)
 # ── Match analysis cache ──
 # Key: hash(discipline, sorted participants) → {"result": str, "ts": datetime}
 _match_cache: Dict[str, Dict[str, Any]] = {}
-_CACHE_TTL = timedelta(days=2)  # кэш: события старше 2 дней удаляются
+_CACHE_TTL = timedelta(days=7)  # кэш: события старше 7 дней удаляются
 _CACHE_MAX = 200
 _cache_lock = threading.Lock()
 
@@ -368,7 +367,7 @@ def _build_context(match_context: dict | None, opponent: str) -> str:
     return " ".join(part for part in parts if part)
 
 
-def fetch_match_analysis_data(
+async def fetch_match_analysis_data(
     match_name: str,
     fetcher: DataFetcher,
     fetch_method: str,
@@ -403,108 +402,23 @@ def fetch_match_analysis_data(
     logger.info(f"[FETCH] Контекст для side1: {ctx1}")
     logger.info(f"[FETCH] Контекст для side2: {ctx2}")
 
-    # --- Сначала профильные библиотеки (HLTV, sportsipy и т.д.), затем веб: DDG → Serper → Exa/Tavily ---
-    total_line = ""
-    h2h_line = ""
-    try:
-        if discipline in ("football", "футбол"):
-            try:
-                from sportsipy.football.teams import Teams
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    teams = list(Teams())
-                t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
-                t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
-                if t1 and t2:
-                    t1_goals = [g for g in t1.schedule.dataframe['points_for'][-5:]]
-                    t2_goals = [g for g in t2.schedule.dataframe['points_for'][-5:]]
-                    avg_total = (sum(t1_goals) + sum(t2_goals)) / (len(t1_goals) + len(t2_goals))
-                    total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
-                    h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
-                    if not h2h.empty:
-                        h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['points_for'].sum()}:{h2h['points_against'].sum()} по голам"
-            except Exception as e:
-                logger.debug("sportsipy football stats skipped: %s", e)
-        elif discipline in ("hockey", "хоккей"):
-            try:
-                from sportsipy.nhl.teams import Teams as NHLTeams
-                # sportsipy печатает в stdout предупреждение про sports-reference, если сезона/данных нет
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    teams = list(NHLTeams())
-                t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
-                t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
-                if t1 and t2:
-                    t1_goals = [g for g in t1.schedule.dataframe['goals_for'][-5:]]
-                    t2_goals = [g for g in t2.schedule.dataframe['goals_for'][-5:]]
-                    avg_total = (sum(t1_goals) + sum(t2_goals)) / (len(t1_goals) + len(t2_goals))
-                    total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
-                    h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
-                    if not h2h.empty:
-                        h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['goals_for'].sum()}:{h2h['goals_against'].sum()} по шайбам"
-            except Exception as e:
-                logger.debug("sportsipy NHL stats skipped: %s", e)
-        elif discipline in ("cs2", "csgo", "counter-strike 2"):
-            try:
-                from hltv import HLTV
-                hltv = HLTV()
-                matches = hltv.get_matches()
-                found = [m for m in matches if side1.lower() in m['team1']['name'].lower() and side2.lower() in m['team2']['name'].lower()]
-                if found:
-                    match_id = found[0]['id']
-                    stats = hltv.get_match_stats(match_id)
-                    if stats and 'maps' in stats:
-                        total_maps = sum(m['team1Rounds'] + m['team2Rounds'] for m in stats['maps']) / len(stats['maps'])
-                        total_line = f"🎯 Тотал карт: {total_maps:.2f}"
-            except Exception as e:
-                logger.warning(f"HLTV fetch failed: {e}")
-        elif discipline in ("basketball", "баскетбол"):
-            try:
-                from sportsipy.nba.teams import Teams as NBATeams
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    teams = list(NBATeams())
-                t1 = next((t for t in teams if side1.lower() in t.name.lower()), None)
-                t2 = next((t for t in teams if side2.lower() in t.name.lower()), None)
-                if t1 and t2:
-                    t1_pts = [g for g in t1.schedule.dataframe['points_for'][-5:]]
-                    t2_pts = [g for g in t2.schedule.dataframe['points_for'][-5:]]
-                    avg_total = (sum(t1_pts) + sum(t2_pts)) / (len(t1_pts) + len(t2_pts))
-                    total_line = f"🎯 Тотал (средний за 5 игр): {avg_total:.2f}"
-                    h2h = t1.schedule.dataframe[t1.schedule.dataframe['opponent_name'] == t2.name]
-                    if not h2h.empty:
-                        h2h_line = f"🤝 H2H: {t1.name} vs {t2.name} — {len(h2h)} игр, {h2h['points_for'].sum()}:{h2h['points_against'].sum()} по очкам"
-            except Exception as e:
-                logger.warning(f"NBA fetch failed: {e}")
-        elif discipline in ("volleyball", "волейбол"):
-            # Нет официальной библиотеки, только заглушка
-            total_line = "🎯 Тотал: статистика тотала по сетам/очкам недоступна (нет открытого API)"
-        elif discipline in ("tennis", "теннис"):
-            # Тотал по сетам — среднее за 5 последних матчей, если есть данные
-            total_line = "🎯 Тотал: среднее количество сетов за 5 последних матчей (нет открытого API)"
-        elif discipline in ("table_tennis", "настольный теннис"):
-            total_line = "🎯 Тотал: среднее количество сетов за 5 последних матчей (нет открытого API)"
-    except Exception as e:
-        logger.warning(f"Extra stats fetch failed: {e}")
-
     fetch_fn = getattr(fetcher, fetch_method)
     try:
         logger.info(f"[FETCH] Запрос данных для side1: {side1}")
-        data1 = await fetch_fn(side1, context_terms=ctx1)
+        data1 = await asyncio.to_thread(fetch_fn, side1, context_terms=ctx1)
         logger.info(f"[FETCH] Данные side1 получены: {bool(data1)}")
     except Exception as e:
         logger.error("[FETCH] Fetch failed for %s: %s", side1, e)
         data1 = None
     try:
         logger.info(f"[FETCH] Запрос данных для side2: {side2}")
-        data2 = await fetch_fn(side2, context_terms=ctx2)
+        data2 = await asyncio.to_thread(fetch_fn, side2, context_terms=ctx2)
         logger.info(f"[FETCH] Данные side2 получены: {bool(data2)}")
     except Exception as e:
         logger.error("[FETCH] Fetch failed for %s: %s", side2, e)
         data2 = None
 
     parts = [f"{emoji} Матч: {side1.upper()} vs {side2.upper()}"]
-    if total_line:
-        parts.append(total_line)
-    if h2h_line:
-        parts.append(h2h_line)
 
     if data1 and data1.get("report"):
         parts.append(f"\n--- {side1.upper()} ---\n{data1['report']}")

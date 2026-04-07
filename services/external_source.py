@@ -17,7 +17,7 @@ def search_event_thesportsdb(match_name: str) -> dict | None:
         if not events:
             logging.debug("No events found in TheSportsDB for '%s'", match_name)
             return None
-        import httpx
+        return events[0]
     except requests.ConnectionError as e:
         logging.warning("TheSportsDB connection error for '%s': %s", match_name, e)
         return None
@@ -25,10 +25,7 @@ def search_event_thesportsdb(match_name: str) -> dict | None:
         logging.warning("TheSportsDB timeout for '%s': %s", match_name, e)
         return None
     except requests.HTTPError as e:
-                response = httpx.get(url, timeout=10)
-            logging.debug("TheSportsDB API endpoint unavailable (404) for '%s'", match_name)
-        else:
-            logging.warning("TheSportsDB HTTP error for '%s': %s", match_name, e)
+        logging.warning("TheSportsDB HTTP error for '%s': %s", match_name, e)
         return None
     except (ValueError, KeyError) as e:
         logging.warning("TheSportsDB parse error for '%s': %s", match_name, e)

@@ -931,7 +931,34 @@ def collect_validated_sources(
         for result in results:
             if len(validated_sources) >= min_sources:
                 return
-            # ...existing code...
+            url = result.get("href", "")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = result.get("title", "")
+            body = result.get("body", "")
+            source = _extract_source(url)
+            is_trusted = any(domain in url for domain in trusted_domains)
+            # Доверенный домен ИЛИ совпадение токенов сущности в title/body
+            entity_tokens = _normalize_tokens(entity)
+            haystack = f"{title} {body}".lower()
+            token_hits = sum(1 for t in entity_tokens if t in haystack)
+            if is_trusted or token_hits >= 1:
+                excerpt = _fetch_page_excerpt(url, entity) if url else ""
+                validated_sources.append({
+                    "site": source,
+                    "source": source,
+                    "search_engine": result.get("search_engine", "unknown"),
+                    "title": title,
+                    "body": body[:400],
+                    "excerpt": excerpt[:1200],
+                    "href": url,
+                    "validated": True,
+                    "trusted_domain": is_trusted,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                })
+            else:
+                unvalidated_results.append(result)
 
     def _enough_payload() -> Dict[str, Any]:
         return {
@@ -948,9 +975,60 @@ def collect_validated_sources(
             "status": "validated",
         }
 
+    def _fallback_payload() -> Dict[str, Any]:
+        """Fallback: если ничего не провалидировано — скорим сырые результаты по совпадению токенов."""
+        if not validated_sources and unvalidated_results:
+            logger.info("[VALIDATE] Fallback: scoring %d unvalidated results for '%s'", len(unvalidated_results), entity)
+            entity_tokens = _normalize_tokens(entity)
+            scored: List[tuple] = []
+            for result in unvalidated_results:
+                url = result.get("href", "")
+                title = result.get("title", "")
+                body = result.get("body", "")
+                url_text = urlparse(url).path.replace("-", " ").replace("_", " ") if url else ""
+                haystack = f"{title} {body} {url_text}".lower()
+                match_count = sum(1 for t in entity_tokens if t in haystack)
+                if match_count > 0:
+                    scored.append((match_count, result))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for _, result in scored[:min_sources]:
+                url = result.get("href", "")
+                title = result.get("title", "")
+                body = result.get("body", "")
+                excerpt = _fetch_page_excerpt(url, entity) if url else ""
+                source = _extract_source(url)
+                is_trusted = any(domain in url for domain in trusted_domains)
+                validated_sources.append({
+                    "site": source,
+                    "source": source,
+                    "search_engine": result.get("search_engine", "unknown"),
+                    "title": title,
+                    "body": body[:400],
+                    "excerpt": excerpt[:1200],
+                    "href": url,
+                    "validated": False,
+                    "trusted_domain": is_trusted,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                })
+        enough = len(validated_sources) >= min_sources
+        return {
+            "entity": entity,
+            "discipline": discipline,
+            "stat_type": stat_type,
+            "min_sources": min_sources,
+            "freshness_window": timelimit,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "validated_sources": validated_sources,
+            "analysis_sources": analysis_sources,
+            "validated_count": len(validated_sources),
+            "enough_sources": enough,
+            "status": "validated" if enough else "insufficient_sources",
+        }
+
     # 1. DuckDuckGo — первичная проверка сущности в открытом вебе (валидация участника/команды)
     import asyncio
     async def _main_async():
+        nonlocal all_sites, trusted_domains, fallback_attempted
         if DDGS is not None:
             ddg_query = f"{entity} {discipline_label} {stat_type}{context_suffix}"
             logger.info("[VALIDATE] DDG phase: %s", ddg_query)
@@ -979,7 +1057,6 @@ def collect_validated_sources(
 
         if len(validated_sources) < min_sources and not fallback_attempted and region in ("ru", "intl"):
             logger.info("[VALIDATE] Serper regional fallback: alt region for trusted site order")
-            nonlocal all_sites, trusted_domains, fallback_attempted
             fallback_attempted = True
             alt_region = "intl" if region == "ru" else "ru"
             all_sites = get_ordered_entries(alt_region)
@@ -1023,74 +1100,9 @@ def collect_validated_sources(
                 })
             logger.info(f"[VALIDATE] После Exa/Tavily: {len(validated_sources)} валидировано для '{entity}'")
 
-        return _enough_payload()
+        return _fallback_payload()
 
     return asyncio.run(_main_async())
-    if len(validated_sources) >= min_sources:
-            logger.info(f"[VALIDATE] После Exa/Tavily достаточно данных: {len(validated_sources)}")
-            return {
-                "entity": entity,
-                "discipline": discipline,
-                "stat_type": stat_type,
-                "min_sources": min_sources,
-                "freshness_window": timelimit,
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-                "validated_sources": validated_sources,
-                "analysis_sources": analysis_sources,
-                "validated_count": len(validated_sources),
-                "enough_sources": True,
-                "status": "validated",
-            }
-
-    # ── Fallback: if still nothing validated, take best-matching raw results ──
-    if not validated_sources and unvalidated_results:
-        logger.info(f"[VALIDATE] Fallback: scoring {len(unvalidated_results)} unvalidated results for '{entity}'")
-        entity_tokens = _normalize_tokens(entity)
-        scored: List[tuple] = []
-        for result in unvalidated_results:
-            url = result.get("href", "")
-            title = result.get("title", "")
-            body = result.get("body", "")
-            url_text = urlparse(url).path.replace("-", " ").replace("_", " ") if url else ""
-            haystack = f"{title} {body} {url_text}".lower()
-            match_count = sum(1 for t in entity_tokens if t in haystack)
-            if match_count > 0:  # at least 1 token matches — not completely random
-                scored.append((match_count, result))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        for _, result in scored[:min_sources]:
-            url = result.get("href", "")
-            title = result.get("title", "")
-            body = result.get("body", "")
-            excerpt = _fetch_page_excerpt(url, entity) if url else ""
-            source = _extract_source(url)
-            is_trusted = any(domain in url for domain in trusted_domains)
-            validated_sources.append({
-                "site": source,
-                "source": source,
-                "search_engine": result.get("search_engine", "unknown"),
-                "title": title,
-                "body": body[:400],
-                "excerpt": excerpt[:1200],
-                "href": url,
-                "validated": False,
-                "trusted_domain": is_trusted,
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-            })
-
-    enough = len(validated_sources) >= min_sources
-    return {
-        "entity": entity,
-        "discipline": discipline,
-        "stat_type": stat_type,
-        "min_sources": min_sources,
-        "freshness_window": timelimit,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
-        "validated_sources": validated_sources,
-        "analysis_sources": analysis_sources,
-        "validated_count": len(validated_sources),
-        "enough_sources": enough,
-        "status": "validated" if enough else "insufficient_sources",
-    }
 
 
 def validate_match_request(match_text: str, date_text: str, discipline: str) -> Dict[str, Any]:

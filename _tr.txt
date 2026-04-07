@@ -1,0 +1,12 @@
+LEN=1145
+⚽ Матч: REAL MADRID vs BARCELONA
+
+--- REAL MADRID ---
+Источники для: Real Madrid
+Дисциплина: football
+Тип статистики: injuries suspensions lineup xG cards home away form recent results standings motivation
+Валидировано: 2
+
+Источник: theoleballcoach.com
+Заголовок: January | 2026 | The Ole BallCoach
+С

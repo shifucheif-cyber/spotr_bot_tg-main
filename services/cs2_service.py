@@ -24,13 +24,13 @@ def _resolve_game_key(discipline: str) -> str | None:
     return None
 
 
-def get_esports_data(match_name: str, discipline: str, match_context: dict | None = None) -> str:
+async def get_esports_data(match_name: str, discipline: str, match_context: dict | None = None) -> str:
     game_key = _resolve_game_key(discipline)
     if not game_key or game_key not in _ESPORTS_CONFIG:
         return f"Матч: {match_name}\n\nНеизвестная киберспортивная дисциплина: {discipline}"
     config = _ESPORTS_CONFIG[game_key]
     fetcher = config["fetcher_fn"]()
-    return fetch_match_analysis_data(
+    return await fetch_match_analysis_data(
         match_name, fetcher, config["method"], config["emoji"],
         match_context=match_context,
     )

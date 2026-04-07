@@ -24,36 +24,6 @@ DISCIPLINE_MAPPINGS = {
     "волейбол": ["volleyball", "вол", "волейбол"],
 }
 
-# Примеры матчей для демонстрации (в реальности это были бы API запросы)
-UPCOMING_MATCHES = {
-    "cs2": [
-        {"home": "FaZe", "away": "Vitality", "date": "2026-03-30", "league": "ESL Pro League"},
-        {"home": "Navi", "away": "Spirit", "date": "2026-03-31", "league": "ESL Pro League"},
-    ],
-    "dota2": [
-        {"home": "Team Liquid", "away": "Secret", "date": "2026-03-30", "league": "The International"},
-    ],
-    "football": [
-        {"home": "Manchester United", "away": "Liverpool", "date": "2026-03-30", "league": "Premier League"},
-        {"home": "Real Madrid", "away": "Barcelona", "date": "2026-03-31", "league": "La Liga"},
-    ],
-    "hockey": [
-        {"home": "Toronto Maple Leafs", "away": "Montreal Canadiens", "date": "2026-03-30", "league": "NHL"},
-    ],
-    "basketball": [
-        {"home": "Lakers", "away": "Celtics", "date": "2026-03-30", "league": "NBA"},
-    ],
-    "tennis": [
-        {"home": "Djokovic", "away": "Alcaraz", "date": "2026-03-30", "league": "ATP"},
-    ],
-    "volleyball": [
-        {"home": "Zenit", "away": "Kazan", "date": "2026-03-30", "league": "CEV Champions League"},
-    ],
-    "mma": [
-        {"home": "Volkanovski", "away": "Topuria", "date": "2026-03-30", "league": "UFC"},
-    ],
-}
-
 
 def normalize_team_name(name: str) -> str:
     """Нормализует названия команд для сравнения"""
@@ -134,14 +104,6 @@ def normalize_discipline(discipline: str) -> str:
     return discipline
 
 
-def get_sport_keys_for_discipline(discipline: str) -> list:
-    """Возвращает ключи в UPCOMING_MATCHES для указанной дисциплины"""
-    normalized = normalize_discipline(discipline)
-    if normalized in DISCIPLINE_MAPPINGS:
-        return DISCIPLINE_MAPPINGS[normalized]
-    return []
-
-
 def get_discipline_for_sport(sport_key: str) -> str:
     """Возвращает полное название дисциплины для ключа спорта (например, 'cs2' -> 'киберспорт')"""
     for discipline, keys in DISCIPLINE_MAPPINGS.items():
@@ -159,73 +121,10 @@ def find_matches_by_teams(
 ) -> list:
     """
     Ищет матч по командам на дату запроса или в близлежащие дни.
-    
-    Args:
-        team1: Первая команда (может быть None)
-        team2: Вторая команда (может быть None)
-        target_date: Целевая дата поиска
-        discipline: Дисциплина (фильтр)
-        days_range: Диапазон дней для поиска (+/- дней)
-    
-    Returns:
-        Список найденных матчей с информацией о дисциплине и дате
+    Сейчас нет внешнего API расписания — всегда возвращает пустой список.
+    Матчи создаются через create_fallback_match_data.
     """
-    
-    if not target_date:
-        target_date = datetime.now()
-    
-    # Нормализуем названия команд
-    resolved = resolve_match_entities(team1 or "", team2 or "", discipline=discipline)
-    team1_value = resolved["team1"]["corrected"] if team1 else None
-    team2_value = resolved["team2"]["corrected"] if team2 else None
-    team1_norm = normalize_team_name(team1_value) if team1_value else None
-    team2_norm = normalize_team_name(team2_value) if team2_value else None
-    
-    # Если указана дисциплина, получаем соответствующие ключи спорта
-    sport_keys = get_sport_keys_for_discipline(discipline) if discipline else None
-    
-    found_matches = []
-    date_range = [target_date + timedelta(days=i) for i in range(-days_range, days_range + 1)]
-    date_range_str = [d.strftime("%Y-%m-%d") for d in date_range]
-    
-    # Ищем во всех дисциплинах
-    for sport, matches in UPCOMING_MATCHES.items():
-        # Если указана дисциплина, проверяем, находится ли sport в списке ключей
-        if sport_keys and sport not in sport_keys:
-            continue
-        
-        for match in matches:
-            home_norm = normalize_team_name(match["home"])
-            away_norm = normalize_team_name(match["away"])
-            match_date = match["date"]
-            
-            # Проверяем совпадение команд
-            team_match = False
-            if team1_norm and team2_norm:
-                # Обе команды должны совпасть
-                if (team1_norm == home_norm and team2_norm == away_norm) or \
-                   (team1_norm == away_norm and team2_norm == home_norm):
-                    team_match = True
-            elif team1_norm:
-                # Хотя бы одна из команд совпадает
-                if team1_norm in [home_norm, away_norm]:
-                    team_match = True
-            elif team2_norm:
-                if team2_norm in [home_norm, away_norm]:
-                    team_match = True
-            
-            # Проверяем дату
-            if team_match and match_date in date_range_str:
-                found_matches.append({
-                    "sport": sport,
-                    "home": match["home"],
-                    "away": match["away"],
-                    "date": match_date,
-                    "league": match["league"],
-                    "user_discipline": discipline,
-                })
-    
-    return found_matches
+    return []
 
 
 def check_match_clarification(

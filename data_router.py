@@ -50,26 +50,12 @@ _ROUTES = [
 ]
 
 
-def _get_match_data_sync(match, discipline, match_context=None):
-    d = discipline.lower()
-
-    for keyword, handler in _ROUTES:
-        if keyword in d:
-            if handler is None:
-                # Киберспорт — передаём discipline для выбора конкретной игры
-                return get_esports_data(match, discipline, match_context=match_context)
-            return handler(match, match_context)
-
-    return f"Нет данных для {discipline}"
-
-
 async def get_match_data(match, discipline, match_context=None):
     d = discipline.lower()
     for keyword, handler in _ROUTES:
         if keyword in d:
             if handler is None:
                 # Киберспорт — передаём discipline для выбора конкретной игры
-                from services.cs2_service import get_esports_data
                 return await get_esports_data(match, discipline, match_context=match_context)
             # Если сервис асинхронный — вызываем через await
             res = handler(match, match_context)

@@ -1,0 +1,4 @@
+hockey: 1982 chars
+basketball: 1770 chars
+cs2: 2336 chars
+mma: 2104 chars
