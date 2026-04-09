@@ -766,13 +766,17 @@ def _analysis_providers() -> List[str]:
     return ["exa", "tavily"]
 
 
-def _merge_analysis_results(query: str, include_domains: List[str]) -> Dict[str, Any]:
+async def _merge_analysis_results(query: str, include_domains: List[str]) -> Dict[str, Any]:
     merged: List[Dict[str, Any]] = []
     seen_urls = set()
     answers: List[str] = []
 
     for provider in _analysis_providers():
-        payload = _search_with_exa(query, include_domains, SEARCH_ANALYSIS_RESULTS_PER_QUERY) if provider == "exa" else _search_with_tavily(query, include_domains, SEARCH_ANALYSIS_RESULTS_PER_QUERY)
+        payload = (
+            await _search_with_exa(query, include_domains, SEARCH_ANALYSIS_RESULTS_PER_QUERY)
+            if provider == "exa"
+            else await _search_with_tavily(query, include_domains, SEARCH_ANALYSIS_RESULTS_PER_QUERY)
+        )
         answer = (payload.get("answer") or "").strip()
         if answer:
             answers.append(f"{provider}: {answer}")
@@ -787,7 +791,7 @@ def _merge_analysis_results(query: str, include_domains: List[str]) -> Dict[str,
     return {"answers": answers, "results": merged}
 
 
-def _collect_analysis_sources(
+async def _collect_analysis_sources(
     entity: str,
     discipline: str,
     stat_type: str,
@@ -833,7 +837,7 @@ def _collect_analysis_sources(
                 break
             queries_made += 1
             logger.info("AI search query %d/%d: %s", queries_made, max_queries, query)
-            payload = _merge_analysis_results(query, [site])
+            payload = await _merge_analysis_results(query, [site])
 
             for answer in payload.get("answers", []):
                 key = answer.lower()

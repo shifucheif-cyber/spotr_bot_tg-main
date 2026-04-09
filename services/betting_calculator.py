@@ -17,8 +17,8 @@ import json
 def extract_probability(llm_response: str) -> float | None:
     """
     Извлекает процент вероятности из ответа модели.
-    Учитывает markdown из контракта: «📈 **Вероятность победы (1-я сторона):** 58%» —
-    после скобки идёт `):**`, старые шаблоны с [:\s]+ после «сторона» не срабатывали.
+    Учитывает markdown из контракта: «📈 **Вероятность победы (1-я сторона):** 58%».
+    После скобки идёт `):**`, поэтому старые шаблоны с `[\\:\\s]+` после «сторона» не срабатывали.
     """
     prioritized = [
         # Контракт бота: 📈 **Вероятность победы (1-я сторона):** N%
@@ -221,7 +221,17 @@ def get_bet_recommendation(llm_response: str) -> dict:
 
     return {
         "probability": probability,
+        "win_probability_team1": data.get("win_probability_team1") if data.get("win_probability_team1") is not None else probability,
+        "win_probability_team2": data.get("win_probability_team2"),
+        "odds": odds,
+        "draw_probability": data.get("draw_probability"),
         "stake_percent": stake_percent,
+        "confidence_score": data.get("confidence_score"),
+        "analysis_summary": data.get("analysis_summary"),
+        "exact_score": data.get("exact_score", "Н/Д"),
+        "total_prediction": data.get("total_prediction", "Н/Д"),
+        "total_recommendation": data.get("total_recommendation", "Н/Д"),
+        "total_value": data.get("total_value", "Н/Д"),
         "recommendation": value_data["recommendation"],
         "status": "success",
     }
