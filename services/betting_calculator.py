@@ -1,3 +1,8 @@
+"""Betting recommendation calculator using Kelly Criterion and Value Betting"""
+import re
+import json
+
+
 def normalize_score(raw_score: str) -> str:
     """
     Приводит счет к формату X:Y, поддерживает 2:1, 2-1, 2 1 и т.д.
@@ -9,9 +14,6 @@ def normalize_score(raw_score: str) -> str:
     if m:
         return f"{m.group(1)}:{m.group(2)}"
     return "Н/Д"
-"""Betting recommendation calculator using Kelly Criterion and Value Betting"""
-import re
-import json
 
 
 def extract_probability(llm_response: str) -> float | None:
@@ -89,10 +91,10 @@ def extract_betting_data(llm_response: str) -> dict:
             prob_t2 = data.get("win_probability_team2")
             if prob_t1 is not None:
                 try: prob_t1 = float(prob_t1)
-                except: prob_t1 = None
+                except (ValueError, TypeError): prob_t1 = None
             if prob_t2 is not None:
                 try: prob_t2 = float(prob_t2)
-                except: prob_t2 = None
+                except (ValueError, TypeError): prob_t2 = None
             if prob_t1 is None:
                 prob_val = data.get("probability")
                 if prob_val is not None:

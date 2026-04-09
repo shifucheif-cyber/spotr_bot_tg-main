@@ -62,4 +62,4 @@ async def get_match_data(match, discipline, match_context=None):
             if asyncio.iscoroutine(res):
                 return await res
             return res
-    return f"Нет данных для {discipline}"
+    raise ValueError(f"Неизвестная дисциплина: {discipline}")

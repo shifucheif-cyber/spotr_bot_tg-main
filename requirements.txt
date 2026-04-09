@@ -1,7 +1,6 @@
 aiogram
 pytz
 httpx>=0.24.0
-requests
 google-genai
 groq
 openai
@@ -13,3 +12,5 @@ lxml
 ddgs
 tavily-python
 exa-py
+# PostgreSQL (optional, for production)
+# psycopg2-binary

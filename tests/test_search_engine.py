@@ -84,5 +84,40 @@ class SearchEngineTests(unittest.TestCase):
         self.assertIsNone(report["match"])
 
 
+class CheckRequiredDataTests(unittest.TestCase):
+    def test_all_found(self):
+        text = "форма последние 5 матчей очные встречи H2H травмы дисквалификации"
+        result = search_engine.check_required_data(text, ["form", "h2h", "injuries"], "football")
+        self.assertTrue(result["satisfied"])
+        self.assertEqual(result["missing"], [])
+
+    def test_none_found(self):
+        text = "Какой-то нерелевантный текст без данных"
+        result = search_engine.check_required_data(text, ["form", "h2h", "injuries"], "football")
+        self.assertFalse(result["satisfied"])
+        self.assertEqual(sorted(result["missing"]), ["form", "h2h", "injuries"])
+
+    def test_partial(self):
+        text = "Форма команды за последние 5 матчей: ВВНПВ"
+        result = search_engine.check_required_data(text, ["form", "h2h", "injuries"], "football")
+        self.assertFalse(result["satisfied"])
+        self.assertIn("form", result["found"])
+        self.assertIn("h2h", result["missing"])
+
+    def test_empty_text(self):
+        result = search_engine.check_required_data("", ["form"], "football")
+        self.assertFalse(result["satisfied"])
+        self.assertEqual(result["missing"], ["form"])
+
+    def test_empty_keys(self):
+        result = search_engine.check_required_data("some text", [], "football")
+        self.assertTrue(result["satisfied"])
+
+    def test_case_insensitive(self):
+        text = "HEAD TO HEAD statistics H2H INJURIES suspended"
+        result = search_engine.check_required_data(text, ["h2h", "injuries"], "football")
+        self.assertTrue(result["satisfied"])
+
+
 if __name__ == "__main__":
     unittest.main()

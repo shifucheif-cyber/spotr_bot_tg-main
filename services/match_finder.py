@@ -5,12 +5,20 @@ Match finder module: поиск матчей по командам и датам
 
 import re
 import logging
+import pytz
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Tuple
 
 from services.name_normalizer import normalize_entity_name, resolve_match_entities, split_match_text
+from services.external_source import search_upcoming_events_by_team
 
 logger = logging.getLogger(__name__)
+
+MSK_TZ = pytz.timezone('Europe/Moscow')
+
+def get_msk_now() -> datetime:
+    """Возвращает текущее время по Москве."""
+    return datetime.now(MSK_TZ)
 
 # Маппинг названий дисциплин
 DISCIPLINE_MAPPINGS = {
@@ -44,13 +52,16 @@ def parse_date(date_str: str) -> Optional[datetime]:
     """Парсит дату из строки (поддерживает русские месяцы и разные форматы)"""
     date_str = date_str.strip().lower()
     
+    # Инициализируем текущую дату по Москве (без времени для удобства сравнения)
+    now_msk = get_msk_now()
+    
     # Специальные значения
-    if date_str in ["сегодня", "today", "сегодня", "now"]:
-        return datetime.now()
-    if date_str in ["завтра", "tomorrow", "завтра"]:
-        return datetime.now() + timedelta(days=1)
+    if date_str in ["сегодня", "today", "now"]:
+        return now_msk
+    if date_str in ["завтра", "tomorrow"]:
+        return now_msk + timedelta(days=1)
     if date_str in ["послезавтра", "day after tomorrow"]:
-        return datetime.now() + timedelta(days=2)
+        return now_msk + timedelta(days=2)
     
     # Маппинг русских месяцев
     months_map = {
@@ -81,16 +92,25 @@ def parse_date(date_str: str) -> Optional[datetime]:
         "%d.%m.%y",  # ✅ Добавляем 2-значный год (30.03.26)
         "%d-%m-%Y",
         "%Y-%m-%d",
-        "%d.%m",
         "%d/%m/%Y",
         "%d %m %Y",
     ]
     
     for fmt in formats:
         try:
-            return datetime.strptime(date_str, fmt)
+            result = datetime.strptime(date_str, fmt)
+            return result
         except ValueError:
             continue
+    
+    # dd.mm без года — парсим вручную, чтобы избежать DeprecationWarning (Python 3.15)
+    import re as _re
+    m = _re.match(r'^(\d{1,2})\.(\d{1,2})$', date_str)
+    if m:
+        try:
+            return datetime(get_msk_now().year, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            pass
     
     return None
 
@@ -121,10 +141,21 @@ def find_matches_by_teams(
 ) -> list:
     """
     Ищет матч по командам на дату запроса или в близлежащие дни.
-    Сейчас нет внешнего API расписания — всегда возвращает пустой список.
-    Матчи создаются через create_fallback_match_data.
+    Использует TheSportsDB API для поиска ближайших матчей.
     """
-    return []
+    if not team1:
+        return []
+    try:
+        matches = search_upcoming_events_by_team(
+            team_name=team1,
+            opponent_name=team2,
+            target_date=target_date,
+            days_range=days_range,
+        )
+        return matches
+    except Exception as e:
+        logger.debug("find_matches_by_teams error: %s", e)
+        return []
 
 
 def check_match_clarification(

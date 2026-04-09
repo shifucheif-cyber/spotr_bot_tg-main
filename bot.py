@@ -1,8 +1,6 @@
 ﻿import pytz
 from datetime import datetime, timedelta, timezone
 import os
-import datetime as datetime_module
-import re
 import asyncio
 import logging
 from pathlib import Path
@@ -13,37 +11,29 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 from dotenv import load_dotenv
-from google.genai import Client as GoogleClient
-from google.genai import types as genai_types
-from groq import Client as GroqClient
 
 # --- LOCAL IMPORTS ---
 from data_router import get_match_data
-from services.e2e_summary import emit_quiet_e2e_summary
 from services.logging_utils import configure_console_output, configure_logging
+from services import llm_clients
 from services.match_finder import create_fallback_match_data, format_match_confirmation
 from services.prompts import get_discipline_prompt
 from services.response_formatter import format_prediction_response, split_long_message
 from services.name_normalizer import resolve_entity_name, resolve_match_entities, split_match_text
 from services.search_engine import validate_match_request
+from services.external_source import search_event_thesportsdb
 from services.user_store import (
-    get_stats_summary,
-    get_user_details,
     init_user_store,
-    list_recent_users,
-    log_user_event,
     record_analysis_result,
     touch_user,
+    check_daily_limit,
+    increment_daily_request,
 )
 
 # --- CONFIG ---
+ENABLE_PAYWALL = os.getenv("ENABLE_PAYWALL", "false").lower() in ("true", "1", "yes")
+MAX_FREE_REQUESTS = int(os.getenv("MAX_FREE_REQUESTS", "3"))
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-
-def to_moscow_time(dt: datetime) -> datetime:
-    """Преобразует datetime (UTC или naive) в московское время."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(MOSCOW_TZ)
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
@@ -52,94 +42,43 @@ configure_logging(default_level="WARNING")
 logger = logging.getLogger(__name__)
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
 LLM_FALLBACK_ORDER = ["groq", "sambanova", "google", "deepseek"]
-
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.0-pro")
-GOOGLE_API_VERSION = os.getenv("GOOGLE_API_VERSION", "v1")
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "compound-beta-mini")
-GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com")
-
-SAMBANOVA_API_KEY = os.getenv("SAMBANOVA_API_KEY")
-SAMBANOVA_MODEL = os.getenv("SAMBANOVA_MODEL", "Meta-Llama-3.3-70B-Instruct")
-SAMBANOVA_BASE_URL = os.getenv("SAMBANOVA_BASE_URL", "https://api.sambanova.ai/v1")
-
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "483078446"))
 
 if not TG_TOKEN:
     raise ValueError("TELEGRAM_TOKEN не задан")
 
-# --- INIT CLIENTS ---
+# --- INIT CLIENTS (тихий bootstrap) ---
+llm_clients.init_llm_clients()
+
 bot = Bot(token=TG_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-google_client = None
-if GOOGLE_API_KEY and not GOOGLE_API_KEY.startswith("your_"):
-    try:
-        google_client = GoogleClient(
-            api_key=GOOGLE_API_KEY,
-            http_options=genai_types.HttpOptions(api_version=GOOGLE_API_VERSION),
-        )
-    except Exception as e:
-        logger.warning(f"Failed to initialize Google client: {e}")
-
-groq_client = None
-if GROQ_API_KEY:
-    groq_client = GroqClient(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL or None)
-
-deepseek_client = None
-if DEEPSEEK_API_KEY:
-    try:
-        from openai import AsyncOpenAI
-        deepseek_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-    except Exception as e:
-        logger.warning(f"Failed to initialize DeepSeek client: {e}")
-
-sambanova_client = None
-if SAMBANOVA_API_KEY:
-    try:
-        from openai import AsyncOpenAI
-        sambanova_client = AsyncOpenAI(api_key=SAMBANOVA_API_KEY, base_url=SAMBANOVA_BASE_URL)
-    except Exception as e:
-        logger.warning(f"Failed to initialize SambaNova client: {e}")
-
-SELECTED_GOOGLE_MODEL = GOOGLE_MODEL
-
 # --- LLM HELPERS ---
-GROQ_STABLE_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "llama3-8b-8192"]
-
-def get_available_google_models() -> list[str]:
-    if not google_client: return []
-    try:
-        pager = google_client.models.list(config={"page_size": 50})
-        return [m.name for m in pager if any(v in m.name.lower() for v in ["gemini-2", "gemini-3"])]
-    except: return []
 
 async def generate_with_google(contents: str, discipline: str, discipline_key: str = None) -> str:
-    if not google_client: raise ValueError("Google client not configured")
+    client = llm_clients.google_client
+    if not client:
+        raise ValueError(f"Google client not initialized: {llm_clients.init_errors.get('google', 'unknown')}")
     system_prompt = get_discipline_prompt(discipline, discipline_key)
     request_contents = f"SYSTEM:\n{system_prompt}\n\nUSER:\n{contents}"
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(None, lambda: google_client.models.generate_content(model=SELECTED_GOOGLE_MODEL, contents=request_contents))
+    loop = asyncio.get_running_loop()
+    response = await loop.run_in_executor(None, lambda: client.models.generate_content(model=llm_clients.GOOGLE_MODEL, contents=request_contents))
     return response.text
 
 async def generate_with_groq(contents: str, discipline: str, discipline_key: str = None) -> str:
-    if not groq_client: raise ValueError("Groq client not configured")
+    client = llm_clients.groq_client
+    if not client:
+        raise ValueError(f"Groq client not initialized: {llm_clients.init_errors.get('groq', 'unknown')}")
     system_prompt = get_discipline_prompt(discipline, discipline_key)
-    models = [GROQ_MODEL] + [m for m in GROQ_STABLE_MODELS if m != GROQ_MODEL]
+    models = [llm_clients.GROQ_MODEL] + [m for m in llm_clients.GROQ_STABLE_MODELS if m != llm_clients.GROQ_MODEL]
     for model in models:
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, lambda: groq_client.chat.completions.create(
-                model=model,
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda m=model: client.chat.completions.create(
+                model=m,
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": contents}],
-                max_completion_tokens=2000, temperature=0.2, timeout=30.0
+                max_completion_tokens=2000, temperature=0.2, timeout=15.0
             ))
             if response.choices[0].message.content: return response.choices[0].message.content
         except Exception as e:
@@ -147,20 +86,24 @@ async def generate_with_groq(contents: str, discipline: str, discipline_key: str
     raise ValueError("All Groq models failed")
 
 async def generate_with_deepseek(contents: str, discipline: str, discipline_key: str = None) -> str:
-    if not deepseek_client: raise ValueError("DeepSeek client not configured")
+    client = llm_clients.deepseek_client
+    if not client:
+        raise ValueError(f"DeepSeek client not initialized: {llm_clients.init_errors.get('deepseek', 'unknown')}")
     system_prompt = get_discipline_prompt(discipline, discipline_key)
-    response = await deepseek_client.chat.completions.create(
-        model=DEEPSEEK_MODEL,
+    response = await client.chat.completions.create(
+        model=llm_clients.DEEPSEEK_MODEL,
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": contents}],
         max_completion_tokens=2000, temperature=0.2, timeout=30.0
     )
     return response.choices[0].message.content
 
 async def generate_with_sambanova(contents: str, discipline: str, discipline_key: str = None) -> str:
-    if not sambanova_client: raise ValueError("SambaNova client not configured")
+    client = llm_clients.sambanova_client
+    if not client:
+        raise ValueError(f"SambaNova client not initialized: {llm_clients.init_errors.get('sambanova', 'unknown')}")
     system_prompt = get_discipline_prompt(discipline, discipline_key)
-    response = await sambanova_client.chat.completions.create(
-        model=SAMBANOVA_MODEL,
+    response = await client.chat.completions.create(
+        model=llm_clients.SAMBANOVA_MODEL,
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": contents}],
         max_tokens=2000, temperature=0.2, timeout=30.0
     )
@@ -210,28 +153,90 @@ def build_annotation_block(match_text: str) -> str:
     sides = split_match_text(match_text)
     return f"Данные матча:\n1️⃣ {sides[0]}\n2️⃣ {sides[1]}" if len(sides) == 2 else ""
 
-def resolve_match_validation(team1: str, team2: str, date_text: str, disc: str, disc_key: str = None) -> tuple[dict, str, bool]:
+async def resolve_match_validation(team1: str, team2: str, date_text: str, disc: str, disc_key: str = None) -> tuple[dict, str, bool, list]:
+    """Returns (match_data, report, is_valid, validated_sources)."""
     match_text = f"{team1} vs {team2}"
-    val = validate_match_request(match_text, date_text, disc_key or disc)
+    loop = asyncio.get_running_loop()
+    val = await loop.run_in_executor(None, validate_match_request, match_text, date_text, disc_key or disc)
+    validated_sources = []
+    for pr in val.get("participant_reports", []):
+        validated_sources.extend(pr.get("validated_sources", []))
+
     if val.get("status") == "validated" and val.get("match"):
         match_payload = val["match"]
         if val.get("region"): match_payload["region"] = val["region"]
-        return match_payload, val.get("report", ""), True
+        return match_payload, val.get("report", ""), True, validated_sources
     
-    from services.external_source import search_event_thesportsdb
-    event = search_event_thesportsdb(match_text)
+    event = await loop.run_in_executor(None, search_event_thesportsdb, match_text)
     if event:
-        return {"sport": disc_key or disc, "home": event.get("strHomeTeam", team1), "away": event.get("strAwayTeam", team2), "date": event.get("dateEvent", date_text), "league": event.get("strLeague", ""), "user_discipline": disc}, "TheSportsDB: найден", True
+        return {"sport": disc_key or disc, "home": event.get("strHomeTeam", team1), "away": event.get("strAwayTeam", team2), "date": event.get("dateEvent", date_text), "league": event.get("strLeague", ""), "user_discipline": disc}, "TheSportsDB: найден", True, validated_sources
     
-    return create_fallback_match_data(match_text, date_text, disc), val.get("report", ""), False
+    return create_fallback_match_data(match_text, date_text, disc), val.get("report", ""), False, validated_sources
 
 # --- HANDLERS ---
+@dp.message(Command("premium"))
+async def premium(message: types.Message):
+    if not ENABLE_PAYWALL:
+        await message.answer("⚙️ Раздел в разработке")
+        return
+    from services.payment_service import get_payment_info
+    info = get_payment_info()
+    lines = ["👑 **Подписка SPOTR Premium**\n"]
+    if info["rub_price"]:
+        lines.append(f"💳 Цена: {info['rub_price']} ₽ / {info['days']} дней")
+        if info["rub_details"]:
+            lines.append(f"Реквизиты: `{info['rub_details']}`")
+    if info["usdt_price"]:
+        lines.append(f"💰 USDT: {info['usdt_price']}$ / {info['days']} дней")
+        lines.append(f"Сети: {', '.join(info['networks'])}")
+        if info["usdt_wallets"]:
+            lines.append(f"Кошелёк: `{info['usdt_wallets']}`")
+    if not info["rub_price"] and not info["usdt_price"]:
+        lines.append("⚙️ Тарифы ещё не настроены. Ожидайте обновлений!")
+    lines.append("\n🎟 Есть промокод? /promo")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+@dp.message(Command("promo"))
+async def promo_command(message: types.Message):
+    if not ENABLE_PAYWALL:
+        await message.answer("⚙️ Раздел в разработке")
+        return
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Введите промокод: /promo <код>")
+        return
+    code = args[1].strip()
+    from services.user_store import activate_promo
+    result = activate_promo(message.from_user.id, code)
+    await message.answer(f"{'✅' if result['ok'] else '❌'} {result['message']}")
+
 @dp.message(Command("start"))
 async def start(message: types.Message, state: FSMContext):
-    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, increment_requests=True)
-    kb = [[types.KeyboardButton(text="киберспорт"), types.KeyboardButton(text="Футбол")], [types.KeyboardButton(text="Теннис"), types.KeyboardButton(text="ММА/Бокс")], [types.KeyboardButton(text="Волейбол"), types.KeyboardButton(text="Хоккей")], [types.KeyboardButton(text="Баскетбол")]]
+    await state.clear()
+
+    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, increment_requests=False)
+    kb = []
+    if ENABLE_PAYWALL:
+        kb.append([types.KeyboardButton(text="🎁 Промо (free)"), types.KeyboardButton(text="⭐ Премиум")])
+    kb.extend([[types.KeyboardButton(text="киберспорт"), types.KeyboardButton(text="Футбол")], [types.KeyboardButton(text="Теннис"), types.KeyboardButton(text="ММА/Бокс")], [types.KeyboardButton(text="Волейбол"), types.KeyboardButton(text="Хоккей")], [types.KeyboardButton(text="Баскетбол")]])
     await message.answer("🎯 Выберите дисциплину:", reply_markup=types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True))
     await state.set_state(OrderAnalysis.waiting_discipline)
+
+@dp.message(lambda m: m.text == "🎁 Промо (free)")
+async def promo_button(message: types.Message):
+    if not ENABLE_PAYWALL:
+        return
+    user_id = message.from_user.id
+    remaining = MAX_FREE_REQUESTS
+    if not check_daily_limit(user_id, max_free=MAX_FREE_REQUESTS):
+        remaining = 0
+    await message.answer(f"🎁 Бесплатный тариф: {remaining} из {MAX_FREE_REQUESTS} запросов в сутки.\nПросто выберите дисциплину и начните анализ!")
+
+@dp.message(lambda m: m.text == "⭐ Премиум")
+async def premium_button(message: types.Message):
+    if not ENABLE_PAYWALL:
+        return
+    await premium(message)
 
 @dp.message(OrderAnalysis.waiting_discipline)
 async def set_discipline(message: types.Message, state: FSMContext):
@@ -293,45 +298,56 @@ async def handle_date(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(date=date)
     await callback.message.edit_text(f"📅 Дата: {date}")
     data = await state.get_data()
-    found, report, valid = resolve_match_validation(data['team1'], data['team2'], date, data.get('full_discipline', data['discipline']), data.get('discipline_key'))
+    found, report, valid, validated_sources = await resolve_match_validation(data['team1'], data['team2'], date, data.get('full_discipline', data['discipline']), data.get('discipline_key'))
     if found:
-        await state.update_data(found_match=found, clarification_type='ok' if valid else 'fallback', match_validation_report=report)
+        await state.update_data(found_match=found, clarification_type='ok' if valid else 'fallback', match_validation_report=report, match_validation_sources=validated_sources)
         await callback.message.answer(format_match_confirmation({"status": "ok", "match": found, "needs_confirmation": False}) if valid else f"📊 Анализ: {found['home']} vs {found['away']}")
-        await start_analysis(callback.message, state)
+        await start_analysis(callback.message, state, user_id=callback.from_user.id, real_user=callback.from_user)
     else:
+        logger.error("resolve_match_validation returned empty — should never happen")
         await callback.message.answer("❌ Ошибка. Введите первую команду заново:")
         await state.set_state(OrderAnalysis.waiting_team1)
 
 async def fetch_match_data(match_name: str, disc: str, ctx: dict, block: str) -> tuple[str, str]:
     try:
         data = await asyncio.wait_for(get_match_data(match_name, disc, match_context=ctx), timeout=120)
-    except:
+    except Exception:
         data = f"Матч: {match_name}\nДата: {ctx.get('date')}\nСбор данных затянулся. Используй доступное."
     payload = f"{data}\n\n{block}\n\n{build_annotation_block(match_name)}"
     return payload, data
 
-async def start_analysis(message: types.Message, state: FSMContext):
+async def start_analysis(message: types.Message, state: FSMContext, *, user_id: int = None, real_user: types.User = None):
+    user_id = user_id or message.from_user.id
+    
+    if ENABLE_PAYWALL:
+        if not check_daily_limit(user_id, max_free=MAX_FREE_REQUESTS):
+            await message.answer("❌ Суточный лимит бесплатных прогнозов исчерпан. Попробуйте завтра или ожидайте подписку /premium.")
+            await state.clear()
+            return
+            
+    touch_user(real_user or message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, increment_requests=True)
+    if ENABLE_PAYWALL:
+        increment_daily_request(user_id)
+        
     data = await state.get_data()
     status = await message.answer("🔎 Анализирую...")
     try:
         disc = data.get('full_discipline') or data.get('discipline', 'киберспорт')
         m = data.get('found_match') or {}
-        match_name = f"{m.get('home','')} vs {m.get('away','')}" or data.get('match')
-        ctx = {"date": m.get("date") or data.get("date"), "league": m.get("league", ""), "sport": m.get("sport", ""), "home": m.get("home", ""), "away": m.get("away", "")}
+        if m.get('home') and m.get('away'):
+            match_name = f"{m['home']} vs {m['away']}"
+        else:
+            match_name = data.get('match', 'Unknown vs Unknown')
+        ctx = {"date": m.get("date") or data.get("date") or "не указана", "league": m.get("league", ""), "sport": m.get("sport", ""), "home": m.get("home", ""), "away": m.get("away", ""), "pre_validated_sources": data.get("match_validation_sources", [])}
 
         block = f"Матч: {match_name}\nДата: {ctx['date']}\nЛига: {ctx['league']}\n{data.get('match_validation_report', '')}"
-        payload, search_data = await fetch_match_data(match_name, disc, ctx, block)
-
-        # Очистка HTML-тегов из search_data
-        clean_search_data = re.sub(r'<[^>]+>', '', search_data) if search_data else ''
-        # Вставка статистического блока
-        stat_block = f"\n\nCONTEXT DATA FOR ANALYSIS: {clean_search_data}\nPlease identify recent H2H scores and average totals from this text to calculate your prediction. Используй следующие статистические данные для расчета точного счета и тотала: {clean_search_data}. Опирайся на реальные цифры последних встреч."
-        full_prompt = f"{payload}\n{stat_block}"
+        payload, _ = await fetch_match_data(match_name, disc, ctx, block)
+        full_prompt = payload
 
         res = await generate_content_with_metadata(full_prompt, disc, data.get('discipline_key'))
 
         if res.get("text"):
-            record_analysis_result(message.from_user.id, discipline=disc, match_text=match_name, success=True)
+            record_analysis_result(user_id, discipline=disc, match_text=match_name, success=True)
             final = format_prediction_response(match_name, res["text"])
             for part in split_long_message(final):
                 await message.answer(part, parse_mode="HTML")
@@ -346,8 +362,29 @@ async def start_analysis(message: types.Message, state: FSMContext):
 
 async def main():
     init_user_store()
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+
+    # --- preflight (quiet) ---
+    from preflight_check import run_preflight
+    status, messages = run_preflight(quiet=True)
+    if status == "FAIL":
+        for m in messages:
+            print(m)
+        return
+    if status == "WARN":
+        for m in messages:
+            logger.info(m)
+
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    except (Exception,) as e:
+        err_name = type(e).__name__
+        if "TelegramNetworkError" in err_name or "ClientConnectorError" in err_name:
+            print(f"Telegram недоступен: {e}")
+        else:
+            raise
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

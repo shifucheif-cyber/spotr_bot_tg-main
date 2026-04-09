@@ -70,9 +70,9 @@ def get_discipline_prompt(discipline: str, discipline_key: str = None) -> str:
     # 3. Пытаемся загрузить специфичный промпт
     prompt_content = load_prompt_file(filename)
     
-    # 4. Если файл не найден, пробуем fallback на cybersport.md или football.md
+    # 4. Если файл не найден, пробуем fallback на cybersport.md
     if not prompt_content:
-        logger.info(f"Fallback for {target_key} to cybersport.md")
+        logger.warning("Prompt file not found for '%s' (%s), falling back to cybersport.md", target_key, filename)
         prompt_content = load_prompt_file("cybersport.md")
         
     return f"{prompt_content}\n\n{common_suffix}"

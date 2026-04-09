@@ -33,9 +33,9 @@ class DataRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "mma-result")
         mocked_mma.assert_awaited_once_with("Makhachev vs Oliveira", subdiscipline="mma", match_context={"date": "2026-04-10"})
 
-    async def test_returns_fallback_message_for_unknown_discipline(self):
-        result = await data_router.get_match_data("A vs B", "handball", {})
-        self.assertEqual(result, "Нет данных для handball")
+    async def test_raises_for_unknown_discipline(self):
+        with self.assertRaises(ValueError):
+            await data_router.get_match_data("A vs B", "handball", {})
 
 
 if __name__ == "__main__":

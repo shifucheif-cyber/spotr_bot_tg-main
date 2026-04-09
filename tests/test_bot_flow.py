@@ -116,7 +116,7 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch.object(bot, "validate_match_request", return_value=validated):
-            found, report, valid = bot.resolve_match_validation("Зенит", "ЦСКА", "10.04.26", "футбол")
+            found, report, valid, sources = await bot.resolve_match_validation("Зенит", "ЦСКА", "10.04.26", "футбол")
 
         self.assertTrue(valid)
         self.assertEqual(report, "validated report")
@@ -125,10 +125,10 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_date_starts_analysis_for_valid_match(self):
         state = FakeState({"team1": "Зенит", "team2": "ЦСКА", "discipline": "футбол"})
         message = SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock())
-        callback = SimpleNamespace(data="date_10.04.26", answer=AsyncMock(), message=message)
+        callback = SimpleNamespace(data="date_10.04.26", answer=AsyncMock(), message=message, from_user=SimpleNamespace(id=123))
         found_match = {"home": "Зенит", "away": "ЦСКА", "date": "10.04.26", "league": "РПЛ"}
 
-        with patch.object(bot, "resolve_match_validation", return_value=(found_match, "report", True)), \
+        with patch.object(bot, "resolve_match_validation", new=AsyncMock(return_value=(found_match, "report", True, []))), \
              patch.object(bot, "format_match_confirmation", return_value="confirmed"), \
              patch.object(bot, "start_analysis", new=AsyncMock()) as mocked_analysis:
             await bot.handle_date(callback, state)
@@ -139,7 +139,38 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.data["date"], "10.04.26")
         self.assertEqual(state.data["found_match"], found_match)
         self.assertEqual(state.data["clarification_type"], "ok")
-        mocked_analysis.assert_awaited_once_with(message, state)
+        mocked_analysis.assert_awaited_once_with(message, state, user_id=123, real_user=callback.from_user)
+
+
+    async def test_premium_disabled_when_no_paywall(self):
+        with patch.object(bot, "ENABLE_PAYWALL", False):
+            message = SimpleNamespace(answer=AsyncMock())
+            await bot.premium(message)
+        message.answer.assert_awaited_once()
+        self.assertIn("в разработке", message.answer.call_args[0][0])
+
+    async def test_promo_disabled_when_no_paywall(self):
+        with patch.object(bot, "ENABLE_PAYWALL", False):
+            message = SimpleNamespace(answer=AsyncMock(), text="/promo CODE", from_user=SimpleNamespace(id=1))
+            await bot.promo_command(message)
+        message.answer.assert_awaited_once()
+        self.assertIn("в разработке", message.answer.call_args[0][0])
+
+    async def test_start_keyboard_has_promo_premium_when_paywall(self):
+        with patch.object(bot, "ENABLE_PAYWALL", True), \
+             patch.object(bot, "check_daily_limit", return_value=True), \
+             patch.object(bot, "touch_user"):
+            message = SimpleNamespace(
+                answer=AsyncMock(),
+                from_user=SimpleNamespace(id=1, username="u", first_name="F", last_name="L"),
+            )
+            state = FakeState()
+            await bot.start(message, state)
+        call_args = message.answer.call_args
+        kb = call_args[1]["reply_markup"].keyboard
+        first_row_texts = [btn.text for btn in kb[0]]
+        self.assertIn("🎁 Промо (free)", first_row_texts)
+        self.assertIn("⭐ Премиум", first_row_texts)
 
 
 if __name__ == "__main__":

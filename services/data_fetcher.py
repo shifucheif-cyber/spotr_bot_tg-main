@@ -7,26 +7,13 @@ import asyncio
 import hashlib
 import logging
 import re
-import httpx
 import threading
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 
 from services.search_engine import (
-    collect_validated_sources,
-    format_validated_report,
-    search_cs2_stats,
-    search_dota_stats,
-    search_football_stats,
-    search_lol_stats,
-    search_tennis_player,
-    search_table_tennis_player,
-    search_mma_fighter,
-    search_boxing_fighter,
-    search_basketball_team,
-    search_hockey_team,
-    search_valorant_stats,
-    search_volleyball_team
+    collect_discipline_data,
+    check_required_data,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,7 +21,7 @@ logger = logging.getLogger(__name__)
 # ── Match analysis cache ──
 # Key: hash(discipline, sorted participants) → {"result": str, "ts": datetime}
 _match_cache: Dict[str, Dict[str, Any]] = {}
-_CACHE_TTL = timedelta(days=7)  # кэш: события старше 7 дней удаляются
+_CACHE_TTL = timedelta(days=3)  # кэш: события старше 3 дней удаляются
 _CACHE_MAX = 200
 _cache_lock = threading.Lock()
 
@@ -66,312 +53,47 @@ def _put_cache(key: str, result: str) -> None:
             del _match_cache[oldest]
         _match_cache[key] = {"result": result, "ts": datetime.now(tz=timezone.utc)}
 
-# User agents for requests
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-}
 
-TIMEOUT = 10
+# ── Discipline marker classes ──
+# Used by *_service.py as discipline identifiers passed to fetch_match_analysis_data.
+# The actual data fetching is done by collect_discipline_data() from search_engine.
 
+class CS2Fetcher:
+    _discipline = "cs2"
 
-class DataFetcher:
-    """Base class for fetching match data from various sources."""
-
-    def __init__(self):
-        self.session = None  # requests.Session() удалён, не используется
-
-    def build_validated_payload(
-        self,
-        entity: str,
-        discipline: str,
-        stat_type: str,
-        entity_key: str,
-        context_terms: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        report = collect_validated_sources(
-            entity,
-            discipline,
-            stat_type,
-            min_sources=2,
-            timelimit="m",
-            context_terms=context_terms,
-        )
-        sources = ", ".join(source["source"] for source in report["validated_sources"]) or "нет"
-        return {
-            entity_key: entity,
-            "status": report["status"],
-            "validated_count": report["validated_count"],
-            "validated_sources": sources,
-            "freshness_window": report["freshness_window"],
-            "report": format_validated_report(report),
-        }
-
-
-class CS2Fetcher(DataFetcher):
-    """Fetch CS2/Counter-Strike 2 data from multiple sources."""
-
-    def fetch_team_stats(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """
-        Fetch CS2 team statistics from HLTV.
-        
-        Args:
-            team_name: Team name to search
-            
-        Returns:
-            Dictionary with team stats or None
-        """
-        try:
-            logger.info(f"Fetching CS2 validated stats for {team_name}")
-            return self.build_validated_payload(
-                team_name,
-                "cs2",
-                "HLTV rating roster map pool ban pick player form recent results roster changes",
-                "team",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching team stats for {team_name}: {e}")
-            return None
-
-    def fetch_match_info(self, team1: str, team2: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """
-        Fetch CS2 match information from multiple sources.
-        
-        Args:
-            team1: First team name
-            team2: Second team name
-            
-        Returns:
-            Dictionary with match info from multiple sources
-        """
-        try:
-            match_query = f"{team1} vs {team2}"
-            logger.info(f"Searching for CS2 match info: {match_query}")
-
-            return self.build_validated_payload(
-                f"{team1} vs {team2}",
-                "cs2",
-                "h2h map veto roster form HLTV rating recent results",
-                "match",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching match info for {team1} vs {team2}: {e}")
-            return None
-
-
-class EsportsGameFetcher(DataFetcher):
-    """Fetch Dota 2, LoL, or Valorant data from configured esports sources."""
-
-    GAME_CONFIG = {
-        "dota2": {
-            "team_stat_type": "hero pool draft meta patch winrate early game aggression roster form recent results",
-            "match_stat_type": "h2h stand-ins draft meta hero bans brackets recent results",
-            "team_search": search_dota_stats,
-        },
-        "lol": {
-            "team_stat_type": "champion priority draft meta dragon baron control early game gold lead roster form recent results",
-            "match_stat_type": "h2h draft champion bans roster changes objective control recent results",
-            "team_search": search_lol_stats,
-        },
-        "valorant": {
-            "team_stat_type": "agent picks map win rates clutch stats eco rounds ACS rating roster form recent results",
-            "match_stat_type": "h2h map veto agent picks roster changes clutch stats recent results",
-            "team_search": search_valorant_stats,
-        },
-    }
-
+class EsportsGameFetcher:
     def __init__(self, game_key: str):
-        super().__init__()
-        if game_key not in self.GAME_CONFIG:
-            raise ValueError(f"Unsupported esports game key: {game_key}")
         self.game_key = game_key
-        self.config = self.GAME_CONFIG[game_key]
+        self._discipline = game_key
 
-    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        try:
-            logger.info("Fetching %s esports info for %s", self.game_key, team_name)
-            return self.build_validated_payload(
-                team_name,
-                self.game_key,
-                self.config["team_stat_type"],
-                "team",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error("Error fetching %s team info for %s: %s", self.game_key, team_name, e)
-            return None
+class FootballFetcher:
+    _discipline = "football"
 
-    def fetch_match_info(self, team1: str, team2: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        try:
-            logger.info("Fetching %s match info for %s vs %s", self.game_key, team1, team2)
-            return self.build_validated_payload(
-                f"{team1} vs {team2}",
-                self.game_key,
-                self.config["match_stat_type"],
-                "match",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error("Error fetching %s match info for %s vs %s: %s", self.game_key, team1, team2, e)
-            return None
+class TennisFetcher:
+    _discipline = "tennis"
 
-
-class FootballFetcher(DataFetcher):
-    """Fetch football data from multiple sources."""
-
-    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Fetch football team information."""
-        try:
-            logger.info(f"Fetching football info for {team_name}")
-            return self.build_validated_payload(
-                team_name,
-                "football",
-                "injuries suspensions lineup xG cards home away form recent results standings motivation",
-                "team",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching football info for {team_name}: {e}")
-            return None
-
-
-class TennisFetcher(DataFetcher):
-    """Fetch tennis data from ATP/WTA and Tennis Explorer."""
-
-    def fetch_player_info(self, player_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Fetch tennis player information."""
-        try:
-            logger.info(f"Fetching tennis info for {player_name}")
-            return self.build_validated_payload(
-                player_name,
-                "tennis",
-                "ranking h2h surface win rate serve percentage break points injuries fatigue recent matches form",
-                "player",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching tennis info for {player_name}: {e}")
-            return None
-
-
-class MMAFetcher(DataFetcher):
-    """Fetch MMA/Boxing data from Sherdog, UFC Stats, and BoxRec."""
-
+class MMAFetcher:
     def __init__(self, subdiscipline: str = "mma"):
-        super().__init__()
         self._discipline = "boxing" if subdiscipline == "boxing" else "mma"
-        self._stat_type = (
-            "record titles ranking opposition reach punch output KO ratio power footwork recent fight camp"
-            if self._discipline == "boxing"
-            else "record reach striking accuracy takedown defense cardio ground game submissions recent fight camp"
-        )
 
-    def fetch_fighter_info(self, fighter_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Fetch fighter information."""
-        try:
-            logger.info(f"Fetching {self._discipline} info for {fighter_name}")
-            return self.build_validated_payload(
-                fighter_name,
-                self._discipline,
-                self._stat_type,
-                "fighter",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching {self._discipline} info for {fighter_name}: {e}")
-            return None
+class BasketballFetcher:
+    _discipline = "basketball"
 
+class HockeyFetcher:
+    _discipline = "hockey"
 
-class BasketballFetcher(DataFetcher):
-    """Fetch basketball data from Basketball-Reference and Euroleague official sources."""
+class TableTennisFetcher:
+    _discipline = "table_tennis"
 
-    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Fetch basketball team information."""
-        try:
-            logger.info(f"Fetching basketball info for {team_name}")
-            return self.build_validated_payload(
-                team_name,
-                "basketball",
-                "injuries lineup pace offensive defensive rating rebounds turnovers bench scoring home away form recent results standings",
-                "team",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching basketball info for {team_name}: {e}")
-            return None
-
-
-class HockeyFetcher(DataFetcher):
-    """Fetch hockey data from EliteProspects, NaturalStatTrick."""
-
-    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Fetch hockey team information."""
-        try:
-            logger.info(f"Fetching hockey info for {team_name}")
-            return self.build_validated_payload(
-                team_name,
-                "hockey",
-                "injuries roster power play penalty kill goalie save percentage home away form recent results standings h2h",
-                "team",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching hockey info for {team_name}: {e}")
-            return None
-
-
-class TableTennisFetcher(DataFetcher):
-    """Fetch table tennis data from ITTF and Table Tennis Guide."""
-
-    def fetch_player_info(self, player_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Fetch table tennis player information."""
-        try:
-            logger.info(f"Fetching table tennis info for {player_name}")
-            return self.build_validated_payload(
-                player_name,
-                "table_tennis",
-                "ranking h2h style matchup recent series results form world tour standings",
-                "player",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching table tennis info for {player_name}: {e}")
-            return None
-
-
-class VolleyballFetcher(DataFetcher):
-    """Fetch volleyball data from Volleybox."""
-
-    def fetch_team_info(self, team_name: str, context_terms: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Fetch volleyball team information."""
-        try:
-            logger.info(f"Fetching volleyball info for {team_name}")
-            return self.build_validated_payload(
-                team_name,
-                "volleyball",
-                "roster injuries serve reception attack efficiency setter form home away recent results standings h2h",
-                "team",
-                context_terms=context_terms,
-            )
-        except Exception as e:
-            logger.error(f"Error fetching volleyball info for {team_name}: {e}")
-            return None
-
-
-def _build_context(match_context: dict | None, opponent: str) -> str:
-    """Build context terms string from match context and opponent name."""
-    if not match_context:
-        return opponent
-    parts = [opponent, match_context.get("date", ""), match_context.get("league", "")]
-    return " ".join(part for part in parts if part)
+class VolleyballFetcher:
+    _discipline = "volleyball"
 
 
 async def fetch_match_analysis_data(
     match_name: str,
-    fetcher: DataFetcher,
-    fetch_method: str,
-    emoji: str,
+    fetcher,
+    fetch_method: str = "",
+    emoji: str = "⚡",
     match_context: dict | None = None,
 ) -> str:
     """Unified match data fetcher: parse participants, collect validated sources, return report.
@@ -397,35 +119,32 @@ async def fetch_match_analysis_data(
         logger.info(f"[FETCH] Найден кэш для ключа: {cache_k}")
         return cached
 
-    ctx1 = _build_context(match_context, side2)
-    ctx2 = _build_context(match_context, side1)
-    logger.info(f"[FETCH] Контекст для side1: {ctx1}")
-    logger.info(f"[FETCH] Контекст для side2: {ctx2}")
-
-    fetch_fn = getattr(fetcher, fetch_method)
+    # ── Новый пайплайн: collect_discipline_data (Serper→Tavily/Exa→DDG) ──
     try:
-        logger.info(f"[FETCH] Запрос данных для side1: {side1}")
-        data1 = await asyncio.to_thread(fetch_fn, side1, context_terms=ctx1)
-        logger.info(f"[FETCH] Данные side1 получены: {bool(data1)}")
+        logger.info(f"[FETCH] collect_discipline_data для [{side1}, {side2}], discipline={discipline}")
+        report = await collect_discipline_data(
+            [side1, side2],
+            discipline,
+            match_context=match_context,
+        )
     except Exception as e:
-        logger.error("[FETCH] Fetch failed for %s: %s", side1, e)
-        data1 = None
-    try:
-        logger.info(f"[FETCH] Запрос данных для side2: {side2}")
-        data2 = await asyncio.to_thread(fetch_fn, side2, context_terms=ctx2)
-        logger.info(f"[FETCH] Данные side2 получены: {bool(data2)}")
-    except Exception as e:
-        logger.error("[FETCH] Fetch failed for %s: %s", side2, e)
-        data2 = None
+        logger.error("[FETCH] collect_discipline_data failed: %s", e)
+        report = ""
 
     parts = [f"{emoji} Матч: {side1.upper()} vs {side2.upper()}"]
-
-    if data1 and data1.get("report"):
-        parts.append(f"\n--- {side1.upper()} ---\n{data1['report']}")
-    if data2 and data2.get("report"):
-        parts.append(f"\n--- {side2.upper()} ---\n{data2['report']}")
-
-    if len(parts) == 1:
+    if report:
+        # Min-data gate: проверяем наличие обязательных данных
+        from services.discipline_config import get_config as _get_config
+        _cfg = _get_config(discipline)
+        req_keys = _cfg.get("required_data", []) if _cfg else []
+        if req_keys:
+            data_check = check_required_data(report, req_keys, discipline)
+            if data_check["missing"]:
+                missing_str = ", ".join(data_check["missing"])
+                report += f"\n\n⚠️ Не найдены обязательные данные: {missing_str}. Анализ может быть неточным."
+                logger.warning("[FETCH] Missing required_data for %s: %s", discipline, data_check["missing"])
+        parts.append(report)
+    else:
         parts.append("\nДанные из поисковых источников не найдены. Анализируйте на основе общих знаний.")
 
     result = "\n".join(parts)

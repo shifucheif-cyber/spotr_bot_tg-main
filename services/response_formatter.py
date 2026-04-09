@@ -1,3 +1,19 @@
+import html as html_module
+import re
+import json
+import logging
+from services.name_normalizer import split_match_text
+
+logger = logging.getLogger(__name__)
+
+
+def _escape(text) -> str:
+    """Escape HTML special characters for Telegram parse_mode=HTML."""
+    if not isinstance(text, str):
+        return str(text) if text is not None else ""
+    return html_module.escape(text)
+
+
 def validate_prediction_consistency(prediction_struct: dict, team1: str = None, team2: str = None) -> None:
     """
     Корректирует exact_score в зависимости от winner и вероятности.
@@ -29,12 +45,6 @@ def validate_prediction_consistency(prediction_struct: dict, team1: str = None, 
             logger.warning("Высокая вероятность победы (%.1f%%), но счет ничейный: %s", prob_val, exact_score)
     except Exception:
         pass
-import re
-import json
-import logging
-from services.name_normalizer import split_match_text
-
-logger = logging.getLogger(__name__)
 
 def _extract_contract_field(text: str, patterns: list[str]) -> str:
     for pattern in patterns:
@@ -151,17 +161,17 @@ def format_response_contract(match_text: str, raw_analysis: str, prediction_stru
     stake_text = str(stake) if stake is not None else "ПРОПУСТИТЬ"
     # --- HTML-структура для Telegram ---
     html = []
-    html.append(f"🏆 <b>Победитель:</b> {winner or '?'}")
+    html.append(f"🏆 <b>Победитель:</b> {_escape(winner) or '?'}")
     if len(sides) == 2 and prob1 is not None and prob2 is not None:
-        html.append(f"📈 <b>Вероятность:</b> {sides[0]} {prob1:.1f}% | {sides[1]} {prob2:.1f}%")
+        html.append(f"📈 <b>Вероятность:</b> {_escape(sides[0])} {prob1:.1f}% | {_escape(sides[1])} {prob2:.1f}%")
     elif prob1 is not None:
         html.append(f"📈 <b>Вероятность:</b> {prob1:.1f}%")
     else:
         html.append(f"📈 <b>Вероятность:</b> не определена")
-    html.append(f"🔢 <b>Прогноз счета:</b> {exact_score if exact_score else 'Н/Д'}")
-    html.append(f"📊 <b>Ожидаемый тотал:</b> {total_prediction if total_prediction else 'Н/Д'} ({total_recommendation if total_recommendation else 'Н/Д'})")
-    html.append(f"💰 <b>Ставка:</b> {prediction_struct.get('recommendation', 'Н/Д')} (Келли: {kelly_index})")
-    html.append(f"💡 <b>Анализ:</b> {analysis_summary}")
+    html.append(f"🔢 <b>Прогноз счета:</b> {_escape(exact_score) if exact_score else 'Н/Д'}")
+    html.append(f"📊 <b>Ожидаемый тотал:</b> {_escape(total_prediction) if total_prediction else 'Н/Д'} ({_escape(total_recommendation) if total_recommendation else 'Н/Д'})")
+    html.append(f"💰 <b>Ставка:</b> {_escape(prediction_struct.get('recommendation', 'Н/Д'))} (Келли: {_escape(kelly_index)})")
+    html.append(f"💡 <b>Анализ:</b> {_escape(analysis_summary)}")
     return "\n".join(html)
 
 

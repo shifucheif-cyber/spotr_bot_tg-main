@@ -1,10 +1,12 @@
 """Search and validation helpers for multi-source sports data collection.
 
-Пайплайн данных (согласован с логикой бота):
-1) DuckDuckGo — первичная проверка сущности/события в открытом вебе.
-2) Профильные источники — в data_fetcher (HLTV, WhoScored и т.д.) до/параллельно отчётам collect_validated_sources.
-3) Serper — недостающий контекст: новости, составы, травмы, форма, усталость/график.
-4) Exa / Tavily — только если после Serper всё ещё мало валидных источников.
+Пайплайн данных:
+1) validate_match_request() — DDG-валидация сущности/события.
+2) collect_discipline_data() — сбор данных для анализа:
+   Serper → Tavily/Exa → DDG (последний резерв).
+   По 2 запроса на участника + 1 H2H.
+3) collect_validated_sources() — legacy-каскад (DDG→Serper→Exa/Tavily),
+   используется в validate_match_request.
 """
 
 
@@ -33,10 +35,6 @@ try:
     from ddgs import DDGS
 except ImportError:
     DDGS = None
-try:
-    from googlesearch import search as google_search_lib
-except ImportError:
-    google_search_lib = None
 
 # --- API keys ---
 EXA_API_KEY = os.getenv("EXA_API_KEY")
@@ -47,11 +45,6 @@ logger = logging.getLogger(__name__)
 logger.info(f"[KEYS] EXA_API_KEY={'SET' if EXA_API_KEY else 'MISSING'}")
 logger.info(f"[KEYS] TAVILY_API_KEY={'SET' if TAVILY_API_KEY else 'MISSING'}")
 logger.info(f"[KEYS] SERPER_API_KEY={'SET' if SERPER_API_KEY else 'MISSING'}")
-
-# --- Заглушки для legacy/удалённых переменных ---
-max_queries = 10
-def _merge_analysis_results(query, sites):
-    return {}
 
 
 def format_validated_report(report: dict) -> str:
@@ -100,12 +93,7 @@ REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 REQUEST_TIMEOUT = 10
-GOOGLE_SEARCH_URL = "https://www.google.com/search"
-ENABLE_GOOGLE_SEARCH = os.getenv("ENABLE_GOOGLE_SEARCH", "false").strip().lower() in {"1", "true", "yes", "on"}
-SEARCH_MAX_SITES = max(1, int(os.getenv("SEARCH_MAX_SITES", "4")))
-SEARCH_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_RESULTS_PER_QUERY", "1")))
-SEARCH_ENABLE_BROAD_WINDOW = os.getenv("SEARCH_ENABLE_BROAD_WINDOW", "false").strip().lower() in {"1", "true", "yes", "on"}
-SEARCH_REGION = os.getenv("SEARCH_REGION", "wt-wt")
+GOOGLE_BACKOFF_SECONDS = max(60, int(os.getenv("GOOGLE_BACKOFF_SECONDS", "900")))
 SEARCH_ANALYSIS_PROVIDER = os.getenv("SEARCH_ANALYSIS_PROVIDER", "hybrid").strip().lower()
 SEARCH_ANALYSIS_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_ANALYSIS_RESULTS_PER_QUERY", "2")))
 SEARCH_ANALYSIS_MAX_SNIPPETS = max(1, int(os.getenv("SEARCH_ANALYSIS_MAX_SNIPPETS", "4")))
@@ -114,7 +102,7 @@ SEARCH_SERP_SUPPLEMENT_TERMS = os.getenv(
     "SEARCH_SERP_SUPPLEMENT_TERMS",
     "news injury suspension lineup transfer substitution fatigue form schedule rumors preview",
 ).strip()
-GOOGLE_BACKOFF_SECONDS = max(60, int(os.getenv("GOOGLE_BACKOFF_SECONDS", "900")))
+SEARCH_MAX_SITES = max(1, int(os.getenv("SEARCH_MAX_SITES", "4")))
 _google_backoff_until = 0.0
 RUSSIAN_CONTEXT_HINTS = {
     "рпл", "фнл", "кубок россии", "кхл", "вхл", "мхл", "единая лига втб",
@@ -309,14 +297,6 @@ DISCIPLINE_VALIDATION_ALIASES = {
     "valorant": "valorant",
 }
 
-CYRILLIC_TO_LATIN = str.maketrans({
-    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
-    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
-    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
-    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
-    "ы": "y", "э": "e", "ю": "yu", "я": "ya", "ъ": "", "ь": "",
-})
-
 
 def _normalize_tokens(text: str) -> List[str]:
     cleaned = re.sub(r"[^\w\s]", " ", text.lower(), flags=re.UNICODE)
@@ -328,13 +308,6 @@ def _extract_source(url: str) -> str:
         return urlparse(url).netloc.replace("www.", "")
     except Exception:
         return "unknown"
-
-
-def _transliterate_text(text: str) -> str:
-    lowered = text.lower()
-    transliterated = lowered.translate(CYRILLIC_TO_LATIN)
-    transliterated = re.sub(r"\s+", " ", transliterated).strip()
-    return transliterated
 
 
 def _clean_context_terms(context_terms: Optional[str]) -> str:
@@ -470,31 +443,56 @@ def _normalize_validation_discipline_key(discipline: str) -> str:
     return DISCIPLINE_VALIDATION_ALIASES.get(cleaned, cleaned)
 
 
-def _google_is_available() -> bool:
-    return ENABLE_GOOGLE_SEARCH and time.monotonic() >= _google_backoff_until
+# Shared thread pool for sync-to-async bridge (avoids creating pool per call)
+_sync_executor = None
 
-
-def _set_google_backoff() -> None:
-    global _google_backoff_until
-    _google_backoff_until = time.monotonic() + GOOGLE_BACKOFF_SECONDS
-
+def _get_sync_executor():
+    global _sync_executor
+    if _sync_executor is None:
+        import concurrent.futures
+        _sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    return _sync_executor
 
 def _fetch_page_excerpt(url: str, entity: str) -> str:
-    """
-    Извлекает фрагмент текста со страницы. 
-    Если возникнет ошибка, возвращает пустую строку.
-    """
+    """Синхронная обёртка для совместимости с legacy collect_validated_sources."""
     try:
-        # Здесь должна быть логика получения текста (например, через httpx или aiohttp)
-        # Но так как это синхронная заглушка, пока оставим базовую обработку:
-        text = "" # Тут предполагается получение контента
-        
-        if not text:
+        asyncio.get_running_loop()
+        # Already inside event loop — run in thread
+        return _get_sync_executor().submit(asyncio.run, _fetch_page_excerpt_async(url, entity)).result()
+    except RuntimeError:
+        # No running loop — safe to use asyncio.run directly
+        try:
+            return asyncio.run(_fetch_page_excerpt_async(url, entity))
+        except Exception as exc:
+            logger.debug("Page fetch failed for %s: %s", url, exc)
             return ""
-            
-        # Возвращаем первые 1200 символов или фрагмент
-        return text[:1200]
-        
+    except Exception as exc:
+        logger.debug("Page fetch failed for %s: %s", url, exc)
+        return ""
+
+
+async def _fetch_page_excerpt_async(url: str, entity: str, max_chars: int = 2000) -> str:
+    """Асинхронно скачивает страницу и извлекает текстовый фрагмент (до max_chars)."""
+    if not url:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
+            resp = await client.get(url, headers=REQUEST_HEADERS)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+            if "text/html" not in content_type and "text/plain" not in content_type:
+                return ""
+            soup = BeautifulSoup(resp.text[:50_000], "lxml")
+            for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                tag.decompose()
+            text = soup.get_text(separator=" ", strip=True)
+            entity_lower = entity.lower()
+            text_lower = text.lower()
+            idx = text_lower.find(entity_lower)
+            if idx >= 0:
+                start = max(0, idx - 200)
+                return text[start:start + max_chars]
+            return text[:max_chars]
     except Exception as exc:
         logger.debug("Page fetch failed for %s: %s", url, exc)
         return ""
@@ -599,48 +597,6 @@ async def search_with_serper(query: str, num_results: int = 5) -> List[Dict[str,
     return []
 
 
-# ── Multi-engine merge (утилита; основной порядок см. collect_validated_sources) ──
-SEARCH_ENGINE_ORDER = [
-    ("ddg", search_with_ddgs),
-    ("serper", search_with_serper),
-]
-
-
-async def multi_engine_search(query: str, num_results: int = 8, timelimit: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Асинхронно объединяет результаты DDG и Serper (сначала DDG, затем Serper)."""
-    all_results: List[Dict[str, Any]] = []
-    seen_urls: set = set()
-
-    for engine_name, search_fn in SEARCH_ENGINE_ORDER:
-        try:
-            if engine_name == "ddg":
-                # TODO: сделать search_with_ddgs асинхронным, если потребуется
-                raw = search_fn(query, num_results=num_results, timelimit=timelimit)
-            elif engine_name == "serper":
-                raw = await search_fn(query, num_results=num_results)
-            elif engine_name == "google":
-                if not _google_is_available():
-                    continue
-                raw = search_fn(query, num_results=num_results)
-            else:
-                raw = search_fn(query, num_results=num_results)
-        except Exception as exc:
-            logger.debug("Engine %s failed: %s", engine_name, exc)
-            continue
-
-        added = 0
-        for r in raw:
-            url = r.get("href", "")
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            r.setdefault("search_engine", engine_name)
-            all_results.append(r)
-            added += 1
-
-        logger.info("Engine '%s': +%d results (total %d)", engine_name, added, len(all_results))
-
-    return all_results
 
 
 async def _search_with_exa(query: str, include_domains: List[str], num_results: int = 3) -> Dict[str, Any]:
@@ -1106,7 +1062,12 @@ def collect_validated_sources(
 
         return _fallback_payload()
 
-    return asyncio.run(_main_async())
+    try:
+        asyncio.get_running_loop()
+        # Inside event loop (e.g. aiogram) — run in thread
+        return _get_sync_executor().submit(asyncio.run, _main_async()).result()
+    except RuntimeError:
+        return asyncio.run(_main_async())
 
 
 def validate_match_request(match_text: str, date_text: str, discipline: str) -> Dict[str, Any]:
@@ -1196,61 +1157,275 @@ def validate_match_request(match_text: str, date_text: str, discipline: str) -> 
     }
 
 
-def _search(entity: str, discipline: str, stat_type: str, context_terms: Optional[str] = None) -> str:
-    report = collect_validated_sources(
-        entity,
-        discipline,
-        stat_type,
-        min_sources=2,
-        timelimit="w",
-        context_terms=context_terms,
-    )
-    return format_validated_report(report)
+# ── Проверка минимальных данных ──
+
+# Маппинг required_data ключей на regex-паттерны для обнаружения в тексте
+_REQUIRED_DATA_PATTERNS = {
+    "form": r"форм[аы]|form\b|серия|streak|последни[еx]|recent|win\b|loss|побед|поражен|результат|result",
+    "h2h": r"h2h|очн[ыеая]|head.to.head|личн[ыеая]\s*встреч|face.?off",
+    "injuries": r"травм|injur|дисквал|suspend|отсутств|absent|miss(?:ing)?|выбы[лв]",
+    "ranking": r"рейтинг|ranking|seed|посев|position|ATP|WTA|ITTF|HLTV",
+    "record": r"рекорд|record|\d+-\d+|побед.*поражен|wins?.*loss",
+    "striking": r"striking|удар|accuracy|точност|punch|significant.strikes",
+    "reach": r"reach|размах|рук|антропометр|height.*weight|рост.*вес",
+    "roster": r"состав|roster|lineup|ростер|игрок|player|team.comp",
+}
 
 
-def search_cs2_stats(team_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(team_name, "cs2", "lineup map pool pistol rounds rating 2.0 recent results", context_terms)
+def check_required_data(
+    collected_text: str,
+    required_keys: List[str],
+    discipline: str = "",
+) -> Dict[str, Any]:
+    """Проверяет наличие обязательных данных в собранном тексте.
+
+    Returns:
+        {"satisfied": bool, "missing": list[str], "found": list[str]}
+    """
+    if not collected_text or not required_keys:
+        return {"satisfied": not required_keys, "missing": list(required_keys), "found": []}
+
+    text_lower = collected_text.lower()
+    found = []
+    missing = []
+    for key in required_keys:
+        pattern = _REQUIRED_DATA_PATTERNS.get(key, re.escape(key))
+        if re.search(pattern, text_lower):
+            found.append(key)
+        else:
+            missing.append(key)
+
+    return {"satisfied": len(missing) == 0, "missing": missing, "found": found}
 
 
-def search_dota_stats(team_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(team_name, "dota2", "hero meta pub stats stand-ins bracket recent results", context_terms)
+# ── Новый пайплайн: collect_discipline_data ──
+
+async def collect_discipline_data(
+    participants: List[str],
+    discipline: str,
+    match_context: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Собирает данные для анализа матча.
+
+    Flow: Serper (min query) → Serper (max query) → check required_data →
+          если missing → Tavily/Exa целевыми запросами → DDG fallback если Serper недоступен.
+    По 2 запроса на участника + 1 H2H.
+
+    Args:
+        participants: список участников (2 элемента).
+        discipline: ключ дисциплины из DISCIPLINE_CONFIG.
+        match_context: {"date": ..., "league": ..., "sport": ..., "home": ..., "away": ...,
+                        "pre_validated_sources": [...]}
+
+    Returns:
+        Форматированный текстовый отчёт для LLM.
+    """
+    from services.discipline_config import get_config, get_search_queries, get_h2h_query
+
+    config = get_config(discipline)
+    if not config:
+        logger.warning("[COLLECT] Нет конфига для дисциплины: %s", discipline)
+        return f"Дисциплина '{discipline}' не поддерживается."
+
+    # Определяем язык запросов
+    context_str = " ".join(participants) + " " + (match_context or {}).get("league", "")
+    is_russian = _should_prefer_russian_sources(participants[0], context_str, discipline)
+
+    all_results: Dict[str, List[Dict[str, Any]]] = {}
+    seen_urls: set = set()
+
+    # Учитываем данные валидации если переданы
+    pre_validated = (match_context or {}).get("pre_validated_sources", [])
+    if pre_validated:
+        for src in pre_validated:
+            url = src.get("href", "")
+            if url:
+                seen_urls.add(url)
+
+    async def _search_primary(query: str, label: str, num: int = 5) -> List[Dict[str, Any]]:
+        """Serper (primary) → DDG (fallback если Serper недоступен)."""
+        results: List[Dict[str, Any]] = []
+
+        # 1) Serper
+        if SERPER_API_KEY:
+            serper_res = await search_with_serper(query, num_results=num)
+            for r in serper_res:
+                url = r.get("href", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    results.append(r)
+            if results:
+                logger.info("[COLLECT] %s: Serper → %d результатов", label, len(results))
+                return results
+
+        # 2) DDG fallback (только если Serper недоступен)
+        if DDGS is not None:
+            ddg_res = search_with_ddgs(query, num_results=num, timelimit="m")
+            for r in ddg_res:
+                url = r.get("href", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    results.append(r)
+            if results:
+                logger.info("[COLLECT] %s: DDG fallback → %d результатов", label, len(results))
+
+        return results
+
+    async def _search_extended(
+        entity: str, missing_keys: List[str], num: int = 4,
+    ) -> List[Dict[str, Any]]:
+        """Tavily/Exa — целевые запросы по недостающим required_data ключам."""
+        if not (TAVILY_API_KEY or EXA_API_KEY):
+            return []
+
+        results: List[Dict[str, Any]] = []
+        sites = [e["site"] for e in DISCIPLINE_SOURCE_CONFIG.get(discipline, [])]
+
+        # Генерируем целевой запрос по missing ключам
+        key_phrases = {
+            "form": "форма результаты последние матчи" if is_russian else "form results recent matches",
+            "h2h": "очные встречи h2h статистика" if is_russian else "head to head h2h stats",
+            "injuries": "травмы дисквалификации отсутствующие" if is_russian else "injuries suspensions absent",
+            "ranking": "рейтинг позиция" if is_russian else "ranking position seed",
+            "record": "рекорд победы поражения" if is_russian else "record wins losses",
+            "striking": "striking accuracy ударная статистика" if is_russian else "striking accuracy stats",
+            "reach": "антропометрия рост вес размах рук" if is_russian else "reach height weight measurements",
+            "roster": "состав ростер игроки" if is_russian else "roster lineup players",
+        }
+        missing_phrase = " ".join(key_phrases.get(k, k) for k in missing_keys)
+        query = f"{entity} {missing_phrase}"
+
+        merged = await _merge_analysis_results(query, sites[:4])
+        for r in merged.get("results", []):
+            url = r.get("href", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                results.append(r)
+
+        if results:
+            logger.info("[COLLECT] %s: Extended (Tavily/Exa) → %d результатов для [%s]",
+                        entity, len(results), ", ".join(missing_keys))
+        return results
+
+    # ── Сбор данных по участникам ──
+    match_date = (match_context or {}).get("date", "")
+    required_keys = config.get("required_data", [])
+
+    for participant in participants:
+        queries = get_search_queries(config, participant, discipline, is_russian)
+        participant_results: List[Dict[str, Any]] = []
+
+        # Запрос #1 — обязательные данные (min)
+        q_min = queries[0] if queries else f"{participant} {discipline}"
+        if match_date:
+            q_min = f"{q_min} {match_date}"
+        res_min = await _search_primary(q_min, f"{participant} min")
+        participant_results.extend(res_min)
+
+        # Запрос #2 — расширенные данные (max)
+        if len(queries) >= 2:
+            q_max = queries[1]
+            if match_date:
+                q_max = f"{q_max} {match_date}"
+            res_max = await _search_primary(q_max, f"{participant} max")
+            participant_results.extend(res_max)
+
+        all_results[participant] = participant_results
+
+    # H2H запрос
+    if len(participants) >= 2:
+        h2h_q = get_h2h_query(config, participants[0], participants[1], discipline, is_russian)
+        h2h_results = await _search_primary(h2h_q, "H2H")
+        all_results["h2h"] = h2h_results
+
+    # Обогащение: скачиваем выжимки со страниц (до 3 лучших на участника)
+    fetch_tasks = []
+    fetch_meta = []  # (key, idx) для привязки результатов
+    for key, results in all_results.items():
+        for i, r in enumerate(results[:3]):
+            url = r.get("href", "")
+            entity = key if key != "h2h" else f"{participants[0]} {participants[1]}"
+            fetch_tasks.append(_fetch_page_excerpt_async(url, entity))
+            fetch_meta.append((key, i))
+
+    if fetch_tasks:
+        excerpts = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+        for (key, idx), excerpt in zip(fetch_meta, excerpts):
+            if isinstance(excerpt, str) and excerpt:
+                all_results[key][idx]["excerpt"] = excerpt
+
+    # ── Проверка required_data и расширенный поиск при нехватке ──
+    for participant in participants:
+        results = all_results.get(participant, [])
+        # Собираем весь текст для проверки (snippets + excerpts + pre_validated)
+        text_parts = []
+        for r in results:
+            text_parts.append(r.get("title", ""))
+            text_parts.append(r.get("body", ""))
+            text_parts.append(r.get("excerpt", ""))
+        # Добавляем pre_validated данные
+        for src in pre_validated:
+            text_parts.append(src.get("title", ""))
+            text_parts.append(src.get("body", ""))
+            text_parts.append(src.get("excerpt", ""))
+        collected_text = " ".join(text_parts)
+
+        check = check_required_data(collected_text, required_keys, discipline)
+        if check["missing"]:
+            logger.info("[COLLECT] %s: missing required_data: %s → расширенный поиск",
+                        participant, check["missing"])
+            extended = await _search_extended(participant, check["missing"])
+            if extended:
+                all_results[participant].extend(extended)
+                # Обогащаем выжимками новые результаты
+                ext_tasks = []
+                ext_meta = []
+                base_idx = len(results)
+                for j, r in enumerate(extended[:2]):
+                    url = r.get("href", "")
+                    ext_tasks.append(_fetch_page_excerpt_async(url, participant))
+                    ext_meta.append((participant, base_idx + j))
+                if ext_tasks:
+                    ext_excerpts = await asyncio.gather(*ext_tasks, return_exceptions=True)
+                    for (k, idx), exc in zip(ext_meta, ext_excerpts):
+                        if isinstance(exc, str) and exc:
+                            all_results[k][idx]["excerpt"] = exc
+
+    # Форматируем отчёт
+    parts = []
+    for participant in participants:
+        results = all_results.get(participant, [])
+        if not results:
+            parts.append(f"\n--- {participant.upper()} ---\nДанные не найдены.")
+            continue
+        lines = [f"\n--- {participant.upper()} ---"]
+        for r in results:
+            lines.append(f"Источник: {_extract_source(r.get('href', ''))} ({r.get('search_engine', '')})")
+            lines.append(f"Заголовок: {r.get('title', '')}")
+            lines.append(f"Сниппет: {r.get('body', '')[:400]}")
+            excerpt = r.get("excerpt", "")
+            if excerpt:
+                lines.append(f"Выжимка: {excerpt[:800]}")
+            lines.append(f"Ссылка: {r.get('href', '')}")
+            lines.append("")
+        parts.append("\n".join(lines))
+
+    h2h_results = all_results.get("h2h", [])
+    if h2h_results:
+        lines = ["\n--- H2H ---"]
+        for r in h2h_results:
+            lines.append(f"Источник: {_extract_source(r.get('href', ''))} ({r.get('search_engine', '')})")
+            lines.append(f"Заголовок: {r.get('title', '')}")
+            lines.append(f"Сниппет: {r.get('body', '')[:400]}")
+            excerpt = r.get("excerpt", "")
+            if excerpt:
+                lines.append(f"Выжимка: {excerpt[:800]}")
+            lines.append(f"Ссылка: {r.get('href', '')}")
+            lines.append("")
+        parts.append("\n".join(lines))
+
+    total_sources = sum(len(v) for v in all_results.values())
+    header = f"Дисциплина: {discipline} | Источников: {total_sources} | Язык запросов: {'RU' if is_russian else 'EN'}"
+    return header + "\n" + "\n".join(parts)
 
 
-def search_lol_stats(team_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(team_name, "lol", "gold per minute object control draft roster recent results", context_terms)
-
-
-def search_valorant_stats(team_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(team_name, "valorant", "map stats agent stats lineup recent results", context_terms)
-
-
-def search_football_stats(team_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(team_name, "football", "injuries suspensions lineups xg sca pressing player ratings recent results", context_terms)
-
-
-def search_tennis_player(player_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(player_name, "tennis", "h2h surface fatigue first serve second serve recent matches", context_terms)
-
-
-def search_table_tennis_player(player_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(player_name, "table_tennis", "ranking results equipment pips inverted style recent matches", context_terms)
-
-
-def search_mma_fighter(fighter_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(fighter_name, "mma", "record reach gym striking accuracy takedown defense control time recent fight", context_terms)
-
-
-def search_boxing_fighter(boxer_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(boxer_name, "boxing", "record titles ranking opposition recent fight", context_terms)
-
-
-def search_basketball_team(team_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(team_name, "basketball", "pace offensive rating lineup injuries recent games", context_terms)
-
-
-def search_hockey_team(team_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(team_name, "hockey", "roster transfers goals assists corsi fenwick khl europe recent games", context_terms)
-
-
-def search_volleyball_team(team_name: str, context_terms: Optional[str] = None) -> str:
-    return _search(team_name, "volleyball", "roster transfers leaders status recent matches", context_terms)
