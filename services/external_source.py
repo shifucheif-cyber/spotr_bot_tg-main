@@ -10,11 +10,12 @@ THESPORTSDB_EVENTS_BY_TEAM_URL = "https://www.thesportsdb.com/api/v1/json/1/even
 THESPORTSDB_SEARCH_TEAM_URL = "https://www.thesportsdb.com/api/v1/json/1/searchteams.php?t={query}"
 
 
-def search_event_thesportsdb(match_name: str) -> dict | None:
+async def search_event_thesportsdb(match_name: str) -> dict | None:
     try:
         query = quote_plus(match_name)
         url = THESPORTSDB_EVENT_URL.format(query=query)
-        response = httpx.get(url, timeout=10)
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url)
         response.raise_for_status()
         data = response.json()
         events = data.get("event")
@@ -36,11 +37,12 @@ def search_event_thesportsdb(match_name: str) -> dict | None:
         return None
 
 
-def _search_team_id(team_name: str) -> Optional[str]:
+async def _search_team_id(team_name: str) -> Optional[str]:
     """Ищет ID команды в TheSportsDB по названию."""
     try:
         url = THESPORTSDB_SEARCH_TEAM_URL.format(query=quote_plus(team_name))
-        resp = httpx.get(url, timeout=10)
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
         resp.raise_for_status()
         teams = resp.json().get("teams")
         if teams:
@@ -50,19 +52,20 @@ def _search_team_id(team_name: str) -> Optional[str]:
     return None
 
 
-def search_upcoming_events_by_team(
+async def search_upcoming_events_by_team(
     team_name: str,
     opponent_name: Optional[str] = None,
     target_date: Optional[datetime] = None,
     days_range: int = 3,
 ) -> List[dict]:
     """Ищет ближайшие матчи команды, опционально фильтруя по сопернику и дате."""
-    team_id = _search_team_id(team_name)
+    team_id = await _search_team_id(team_name)
     if not team_id:
         return []
     try:
         url = THESPORTSDB_EVENTS_BY_TEAM_URL.format(team_id=team_id)
-        resp = httpx.get(url, timeout=10)
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
         resp.raise_for_status()
         events = resp.json().get("events") or []
     except Exception as e:

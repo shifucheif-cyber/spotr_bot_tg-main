@@ -52,7 +52,7 @@ class TestCollectDisciplineData(unittest.TestCase):
         self.assertIn("Источников: 0", result)
 
     @patch("services.search_engine.SERPER_API_KEY", None)
-    @patch("services.search_engine.search_with_ddgs")
+    @patch("services.search_engine.search_with_ddgs", new_callable=AsyncMock)
     @patch("services.search_engine._fetch_page_excerpt_async", new_callable=AsyncMock)
     @patch("services.search_engine._merge_analysis_results", new_callable=AsyncMock)
     def test_fallback_to_ddg(self, mock_merge, mock_excerpt, mock_ddg):

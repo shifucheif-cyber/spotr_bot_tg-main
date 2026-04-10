@@ -95,9 +95,9 @@ def init_llm_clients() -> dict[str, str]:
     groq_client = None
     if GROQ_API_KEY:
         try:
-            from groq import Client as GroqClient
+            from groq import AsyncGroq
 
-            groq_client = GroqClient(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL or None)
+            groq_client = AsyncGroq(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL or None)
         except Exception as e:
             init_errors["groq"] = str(e)
             logger.debug("Groq client init failed: %s", e)

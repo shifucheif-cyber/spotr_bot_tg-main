@@ -1,7 +1,13 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from services import search_engine
+
+
+def run_async(coro):
+    """Helper to run async coroutine in sync test."""
+    return asyncio.run(coro)
 
 
 class SearchEngineTests(unittest.TestCase):
@@ -37,16 +43,16 @@ class SearchEngineTests(unittest.TestCase):
         ]
 
         with patch.object(search_engine, "DDGS", object()), \
-             patch.object(search_engine, "search_with_ddgs", return_value=ddg_results), \
+             patch.object(search_engine, "search_with_ddgs", new=AsyncMock(return_value=ddg_results)), \
              patch.object(search_engine, "search_with_serper", new=AsyncMock(return_value=[])) as mocked_serper, \
              patch.object(search_engine, "_fetch_page_excerpt", return_value=""):
-            report = search_engine.collect_validated_sources(
+            report = run_async(search_engine.collect_validated_sources(
                 "Real Madrid",
                 "football",
                 "injuries lineup",
                 min_sources=2,
                 timelimit="m",
-            )
+            ))
 
         self.assertEqual(report["status"], "validated")
         self.assertEqual(report["validated_count"], 2)
@@ -63,23 +69,23 @@ class SearchEngineTests(unittest.TestCase):
         ]
 
         with patch.object(search_engine, "DDGS", object()), \
-             patch.object(search_engine, "search_with_ddgs", return_value=[]), \
+             patch.object(search_engine, "search_with_ddgs", new=AsyncMock(return_value=[])), \
              patch.object(search_engine, "search_with_serper", new=AsyncMock(return_value=serper_results)) as mocked_serper, \
              patch.object(search_engine, "_fetch_page_excerpt", return_value=""):
-            report = search_engine.collect_validated_sources(
+            report = run_async(search_engine.collect_validated_sources(
                 "CSKA",
                 "hockey",
                 "roster recent results",
                 min_sources=1,
                 timelimit="m",
-            )
+            ))
 
         self.assertEqual(report["status"], "validated")
         self.assertEqual(report["validated_count"], 1)
         mocked_serper.assert_awaited()
 
     def test_validate_match_request_rejects_single_participant(self):
-        report = search_engine.validate_match_request("Real Madrid", "10.04.26", "football")
+        report = run_async(search_engine.validate_match_request("Real Madrid", "10.04.26", "football"))
         self.assertEqual(report["status"], "insufficient_sources")
         self.assertIsNone(report["match"])
 

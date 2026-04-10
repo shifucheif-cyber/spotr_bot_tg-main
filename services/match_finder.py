@@ -132,7 +132,7 @@ def get_discipline_for_sport(sport_key: str) -> str:
     return sport_key
 
 
-def find_matches_by_teams(
+async def find_matches_by_teams(
     team1: Optional[str],
     team2: Optional[str],
     target_date: Optional[datetime] = None,
@@ -146,7 +146,7 @@ def find_matches_by_teams(
     if not team1:
         return []
     try:
-        matches = search_upcoming_events_by_team(
+        matches = await search_upcoming_events_by_team(
             team_name=team1,
             opponent_name=team2,
             target_date=target_date,
@@ -158,7 +158,7 @@ def find_matches_by_teams(
         return []
 
 
-def check_match_clarification(
+async def check_match_clarification(
     match_text: str,
     date_text: str,
     user_discipline: str,
@@ -180,7 +180,7 @@ def check_match_clarification(
     target_date = parse_date(date_text)
     
     # Ищем матчи
-    matches = find_matches_by_teams(
+    matches = await find_matches_by_teams(
         team1=team1,
         team2=team2,
         target_date=target_date,

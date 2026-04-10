@@ -9,10 +9,10 @@
 - Python 3.13+
 - aiogram (асинхронный Telegram Bot API)
 - httpx (асинхронные HTTP-запросы)
-- LLM-провайдеры: Groq (primary), SambaNova, Google Gemini, DeepSeek — с автоматическим fallback
-- SQLite (хранение пользовательских данных)
+- LLM-провайдеры: Groq/AsyncGroq (primary), SambaNova/AsyncOpenAI, Google Gemini (async genai), DeepSeek/AsyncOpenAI — с автоматическим fallback
+- PostgreSQL (основная БД, по умолчанию) через asyncpg (асинхронный пул), SQLite (для dev/тестов) через asyncio.to_thread
 - Markdown (документация и промпты)
-- Внешние спортивные API и поисковые движки (DDG, Serper, Tavily, Exa)
+- Внешние спортивные API и поисковые движки (DDG, Serper, Tavily, Exa) — все async
 
 ## Структура файлов и назначение модулей
 
@@ -27,16 +27,24 @@
 
 ### Каталог services/
 
-- `llm_clients.py` — единый bootstrap LLM-клиентов (Google, Groq, DeepSeek, SambaNova). Инициализирует клиентов из env, при ошибке сохраняет причину в `init_errors` без WARNING-логов. Подробная диагностика — через `get_init_report()` и уровень `DEBUG`.
+- `llm_clients.py` — единый bootstrap LLM-клиентов (Google, Groq/AsyncGroq, DeepSeek/AsyncOpenAI, SambaNova/AsyncOpenAI). Groq и Google используют нативные async-клиенты. Инициализирует клиентов из env, при ошибке сохраняет причину в `init_errors` без WARNING-логов. Подробная диагностика — через `get_init_report()` и уровень `DEBUG`.
 - `basketball_service.py`, `football_service.py`, `hockey_service.py`, `tennis_service.py`, `table_tennis_service.py`, `volleyball_service.py`, `mma_service.py`, `cs2_service.py` — сбор и агрегация данных по конкретной дисциплине.
 - `data_fetcher.py` — маршрутизация сбора данных по дисциплинам. Fetcher-классы — маркеры дисциплин (только атрибут `_discipline`). `fetch_match_analysis_data` — единая точка входа, делегирующая в `collect_discipline_data()`.
-- `search_engine.py` — универсальный слой поиска. `collect_discipline_data()` — основной пайплайн: Serper#1(min) → Serper#2(max) → `check_required_data()` → Tavily/Exa(если missing) → DDG(fallback если Serper недоступен). `validate_match_request()` — DDG-валидация события. `collect_validated_sources()` — legacy-каскад для валидации.
+- `search_engine.py` — универсальный слой поиска (полностью async). Тонкий оркестровщик: пайплайн-функции + реэкспорт имён из `search_providers/`. `collect_discipline_data()` — основной пайплайн: Serper#1(min) → Serper#2(max) → `check_required_data()` → Tavily/Exa(если missing) → DDG(fallback если Serper недоступен). `validate_match_request()` — async DDG-валидация события. `collect_validated_sources()` — async-каскад для валидации.
+
+### Каталог services/search_providers/
+
+Вынесенные из `search_engine.py` модули:
+
+- `config.py` — все константы, API-ключи, конфигурации дисциплин (`DISCIPLINE_SOURCE_CONFIG`, `RUSSIAN_*` hints, `_REQUIRED_DATA_PATTERNS`).
+- `helpers.py` — утилиты: нормализация, валидация, определение региона, построение запросов.
+- `providers.py` — провайдерские функции (DDG, Serper, Exa, Tavily), скачивание страниц, анализ.
 - `discipline_config.py` — конфигурация 12 дисциплин: типы участников, шаблоны поисковых запросов (RU/EN), обязательные/желательные данные.
 - `betting_calculator.py` — расчёт вероятностей, извлечение данных из ответа LLM, формирование рекомендаций по ставкам.
 - `response_formatter.py` — форматирование финального ответа для Telegram, разбивка длинных сообщений.
-- `external_source.py` — работа с внешними источниками данных (TheSportsDB и др.).
+- `external_source.py` — async-работа с внешними источниками данных (TheSportsDB и др.), использует `httpx.AsyncClient`.
 - `logging_utils.py` — конфигурация логирования: подавление шумных внешних логгеров (httpx, groq, openai, google_genai), настройка уровней через env.
-- `user_store.py` — работа с БД пользователей (SQLite / PostgreSQL): учёт запросов, статистика, администрирование, промо-коды, подписки. Бэкенд выбирается через env `DB_BACKEND` (`sqlite` по умолчанию, `postgres`). При PostgreSQL используется `DATABASE_URL`.
+- `user_store.py` — работа с БД пользователей (SQLite / PostgreSQL): учёт запросов, статистика, администрирование, промо-коды, подписки. **Полностью async** — PostgreSQL через `asyncpg.create_pool()`, SQLite через `asyncio.to_thread()`. Бэкенд выбирается через env `DB_BACKEND` (`postgres` по умолчанию, `sqlite` для dev/тестов). При PostgreSQL используется `DATABASE_URL`. Preflight-проверка не пропустит запуск без `DATABASE_URL` при postgres-бэкенде.
 - `payment_service.py` — заготовка верификации платежей (RUB, USDT по 7 сетям). Все функции — заглушки до интеграции с платёжными провайдерами.
 - `prompts.py` — загрузка и подготовка промптов для LLM из каталога `prompts/`.
 - `e2e_summary.py` — сбор и вывод итоговой E2E-статистики.
@@ -81,14 +89,14 @@ Markdown-файлы с промптами для разных дисциплин
 4. `data_router.py` определяет нужный сервис по дисциплине и вызывает его.
 5. Сервис дисциплины инициирует сбор данных через `data_fetcher.fetch_match_analysis_data()` → `search_engine.collect_discipline_data()`. Пайплайн: Serper(query#1 min) → Serper(query#2 max) → `check_required_data()` → если missing: Tavily/Exa целевыми запросами → DDG fallback если Serper недоступен. Данные валидации переиспользуются через `pre_validated_sources`. Язык запросов определяется автоматически (RU для российского контекста). Страницы скачиваются для извлечения выжимок (`_fetch_page_excerpt_async`). После сбора — min-data gate: предупреждение в отчёте если обязательные данные не найдены.
 6. Собранные данные нормализуются и агрегируются в payload.
-7. Payload + системный промпт передаются в LLM через цепочку fallback: `Groq → SambaNova → Google → DeepSeek`.
+7. Payload + системный промпт передаются в LLM через **round-robin ротацию** с fallback: при каждом вызове стартовый провайдер смещается циклически (`groq → sambanova → google → deepseek → groq → ...`), обеспечивая равномерную нагрузку. При ошибке — следующий по кругу.
 8. LLM возвращает структурированный прогноз (JSON + текстовый анализ).
 9. `betting_calculator.py` извлекает вероятности и проверяет корректность. `response_formatter.py` форматирует финальный ответ.
 10. Ответ отправляется пользователю в Telegram (с разбивкой на части при необходимости).
 
 ## LLM Fallback
 
-Порядок: `groq → sambanova → google → deepseek`.
+Порядок: `groq → sambanova → google → deepseek` — **round-robin ротация**: каждый вызов начинается с нового провайдера (циклический сдвиг счётчиком `itertools.count()`). При ошибке — следующий по кругу.
 
 Каждый провайдер пробуется с таймаутом 60 с (Groq — 15 с для быстрого failover). При неудаче — следующий. Если все упали — пользователю возвращается сообщение об ошибке. Инициализация клиентов вынесена в `services/llm_clients.py` и не генерирует WARNING-логов при старте — ошибки сохраняются тихо и проявляются только при фактическом вызове или в preflight-отчёте.
 

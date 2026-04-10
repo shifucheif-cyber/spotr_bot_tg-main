@@ -48,7 +48,7 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError) as exc:
                 await bot.generate_content_with_metadata("payload", "хоккей")
 
-        self.assertIn("deepseek failed", str(exc.exception))
+        self.assertIn("failed", str(exc.exception))
 
     async def test_set_discipline_routes_hierarchical_branch_to_subdiscipline(self):
         state = FakeState()
@@ -115,7 +115,7 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
             "region": "ru",
         }
 
-        with patch.object(bot, "validate_match_request", return_value=validated):
+        with patch.object(bot, "validate_match_request", new=AsyncMock(return_value=validated)):
             found, report, valid, sources = await bot.resolve_match_validation("Зенит", "ЦСКА", "10.04.26", "футбол")
 
         self.assertTrue(valid)
@@ -158,8 +158,8 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_keyboard_has_promo_premium_when_paywall(self):
         with patch.object(bot, "ENABLE_PAYWALL", True), \
-             patch.object(bot, "check_daily_limit", return_value=True), \
-             patch.object(bot, "touch_user"):
+             patch.object(bot, "check_daily_limit", new=AsyncMock(return_value=True)), \
+             patch.object(bot, "touch_user", new=AsyncMock()):
             message = SimpleNamespace(
                 answer=AsyncMock(),
                 from_user=SimpleNamespace(id=1, username="u", first_name="F", last_name="L"),

@@ -10,11 +10,13 @@
 - Обновить `GROQ_API_KEY` в `.env`.
 - Убедиться, что в `.env` заполнены:
   - `TELEGRAM_TOKEN`
+  - `DATABASE_URL` (PostgreSQL, обязательно для production)
   - `GROQ_API_KEY`
   - `SAMBANOVA_API_KEY`
   - `SERPER_API_KEY`
   - `EXA_API_KEY`
   - `TAVILY_API_KEY`
+- Для локальной разработки без PostgreSQL: добавить `DB_BACKEND=sqlite`
 - Не менять порядок fallback-провайдеров: `Groq -> SambaNova -> Google -> DeepSeek`.
 
 ## 2. Preflight-проверка окружения

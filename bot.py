@@ -1,4 +1,5 @@
-﻿import pytz
+﻿import itertools
+import pytz
 from datetime import datetime, timedelta, timezone
 import os
 import asyncio
@@ -62,8 +63,7 @@ async def generate_with_google(contents: str, discipline: str, discipline_key: s
         raise ValueError(f"Google client not initialized: {llm_clients.init_errors.get('google', 'unknown')}")
     system_prompt = get_discipline_prompt(discipline, discipline_key)
     request_contents = f"SYSTEM:\n{system_prompt}\n\nUSER:\n{contents}"
-    loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(None, lambda: client.models.generate_content(model=llm_clients.GOOGLE_MODEL, contents=request_contents))
+    response = await client.aio.models.generate_content(model=llm_clients.GOOGLE_MODEL, contents=request_contents)
     return response.text
 
 async def generate_with_groq(contents: str, discipline: str, discipline_key: str = None) -> str:
@@ -74,12 +74,11 @@ async def generate_with_groq(contents: str, discipline: str, discipline_key: str
     models = [llm_clients.GROQ_MODEL] + [m for m in llm_clients.GROQ_STABLE_MODELS if m != llm_clients.GROQ_MODEL]
     for model in models:
         try:
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(None, lambda m=model: client.chat.completions.create(
-                model=m,
+            response = await client.chat.completions.create(
+                model=model,
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": contents}],
                 max_completion_tokens=2000, temperature=0.2, timeout=15.0
-            ))
+            )
             if response.choices[0].message.content: return response.choices[0].message.content
         except Exception as e:
             logger.warning(f"Groq {model} failed: {e}")
@@ -109,10 +108,14 @@ async def generate_with_sambanova(contents: str, discipline: str, discipline_key
     )
     return response.choices[0].message.content
 
+_llm_call_counter = itertools.count()
+
 async def generate_content_with_metadata(contents: str, discipline: str, discipline_key: str = None) -> dict:
     handlers = {"google": generate_with_google, "groq": generate_with_groq, "deepseek": generate_with_deepseek, "sambanova": generate_with_sambanova}
     last_err = None
-    for provider in LLM_FALLBACK_ORDER:
+    idx = next(_llm_call_counter) % len(LLM_FALLBACK_ORDER)
+    rotated = LLM_FALLBACK_ORDER[idx:] + LLM_FALLBACK_ORDER[:idx]
+    for provider in rotated:
         try:
             res = await asyncio.wait_for(handlers[provider](contents, discipline, discipline_key), timeout=60.0)
             if res: return {"provider": provider, "text": res}
@@ -156,8 +159,7 @@ def build_annotation_block(match_text: str) -> str:
 async def resolve_match_validation(team1: str, team2: str, date_text: str, disc: str, disc_key: str = None) -> tuple[dict, str, bool, list]:
     """Returns (match_data, report, is_valid, validated_sources)."""
     match_text = f"{team1} vs {team2}"
-    loop = asyncio.get_running_loop()
-    val = await loop.run_in_executor(None, validate_match_request, match_text, date_text, disc_key or disc)
+    val = await validate_match_request(match_text, date_text, disc_key or disc)
     validated_sources = []
     for pr in val.get("participant_reports", []):
         validated_sources.extend(pr.get("validated_sources", []))
@@ -167,7 +169,7 @@ async def resolve_match_validation(team1: str, team2: str, date_text: str, disc:
         if val.get("region"): match_payload["region"] = val["region"]
         return match_payload, val.get("report", ""), True, validated_sources
     
-    event = await loop.run_in_executor(None, search_event_thesportsdb, match_text)
+    event = await search_event_thesportsdb(match_text)
     if event:
         return {"sport": disc_key or disc, "home": event.get("strHomeTeam", team1), "away": event.get("strAwayTeam", team2), "date": event.get("dateEvent", date_text), "league": event.get("strLeague", ""), "user_discipline": disc}, "TheSportsDB: найден", True, validated_sources
     
@@ -207,14 +209,14 @@ async def promo_command(message: types.Message):
         return
     code = args[1].strip()
     from services.user_store import activate_promo
-    result = activate_promo(message.from_user.id, code)
+    result = await activate_promo(message.from_user.id, code)
     await message.answer(f"{'✅' if result['ok'] else '❌'} {result['message']}")
 
 @dp.message(Command("start"))
 async def start(message: types.Message, state: FSMContext):
     await state.clear()
 
-    touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, increment_requests=False)
+    await touch_user(message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, increment_requests=False)
     kb = []
     if ENABLE_PAYWALL:
         kb.append([types.KeyboardButton(text="🎁 Промо (free)"), types.KeyboardButton(text="⭐ Премиум")])
@@ -228,7 +230,7 @@ async def promo_button(message: types.Message):
         return
     user_id = message.from_user.id
     remaining = MAX_FREE_REQUESTS
-    if not check_daily_limit(user_id, max_free=MAX_FREE_REQUESTS):
+    if not await check_daily_limit(user_id, max_free=MAX_FREE_REQUESTS):
         remaining = 0
     await message.answer(f"🎁 Бесплатный тариф: {remaining} из {MAX_FREE_REQUESTS} запросов в сутки.\nПросто выберите дисциплину и начните анализ!")
 
@@ -320,14 +322,14 @@ async def start_analysis(message: types.Message, state: FSMContext, *, user_id: 
     user_id = user_id or message.from_user.id
     
     if ENABLE_PAYWALL:
-        if not check_daily_limit(user_id, max_free=MAX_FREE_REQUESTS):
+        if not await check_daily_limit(user_id, max_free=MAX_FREE_REQUESTS):
             await message.answer("❌ Суточный лимит бесплатных прогнозов исчерпан. Попробуйте завтра или ожидайте подписку /premium.")
             await state.clear()
             return
             
-    touch_user(real_user or message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, increment_requests=True)
+    await touch_user(real_user or message.from_user, admin_telegram_id=ADMIN_TELEGRAM_ID, increment_requests=True)
     if ENABLE_PAYWALL:
-        increment_daily_request(user_id)
+        await increment_daily_request(user_id)
         
     data = await state.get_data()
     status = await message.answer("🔎 Анализирую...")
@@ -347,7 +349,7 @@ async def start_analysis(message: types.Message, state: FSMContext, *, user_id: 
         res = await generate_content_with_metadata(full_prompt, disc, data.get('discipline_key'))
 
         if res.get("text"):
-            record_analysis_result(user_id, discipline=disc, match_text=match_name, success=True)
+            await record_analysis_result(user_id, discipline=disc, match_text=match_name, success=True)
             final = format_prediction_response(match_name, res["text"])
             for part in split_long_message(final):
                 await message.answer(part, parse_mode="HTML")
@@ -361,7 +363,7 @@ async def start_analysis(message: types.Message, state: FSMContext, *, user_id: 
         await state.clear()
 
 async def main():
-    init_user_store()
+    await init_user_store()
 
     # --- preflight (quiet) ---
     from preflight_check import run_preflight

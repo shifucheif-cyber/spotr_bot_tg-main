@@ -12,5 +12,5 @@ lxml
 ddgs
 tavily-python
 exa-py
-# PostgreSQL (optional, for production)
-# psycopg2-binary
+# PostgreSQL (production)
+asyncpg
