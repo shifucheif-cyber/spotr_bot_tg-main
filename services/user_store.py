@@ -202,6 +202,18 @@ async def init_user_store() -> None:
         ("promo_requests_left", "INTEGER"),
     ]
 
+    # --- Schema versioning ---
+    schema_version_ddl = """
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER NOT NULL
+        )
+    """
+
+    MIGRATIONS = [
+        # Version 1: add daily_requests, last_request_date, promo columns
+        [f"ALTER TABLE users ADD COLUMN {col} {defn}" for col, defn in columns],
+    ]
+
     if DB_BACKEND == "postgres":
         pool = await _get_pool()
         async with pool.acquire() as conn:
@@ -213,12 +225,20 @@ async def init_user_store() -> None:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_user_events_type_time ON user_events(event_type, event_time)"
             )
-            for col_name, col_def in columns:
-                try:
-                    await conn.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_def}")
-                except Exception:
-                    pass
             await conn.execute(promo_ddl)
+            await conn.execute(schema_version_ddl)
+            row = await conn.fetchrow("SELECT MAX(version) AS v FROM schema_version")
+            current_version = (row["v"] or 0) if row else 0
+            for idx, stmts in enumerate(MIGRATIONS, start=1):
+                if idx <= current_version:
+                    continue
+                for stmt in stmts:
+                    try:
+                        await conn.execute(stmt)
+                    except Exception:
+                        pass
+                await conn.execute("INSERT INTO schema_version (version) VALUES ($1)", idx)
+            logger.info("DB schema at version %d", max(current_version, len(MIGRATIONS)))
     else:
         def _s():
             with closing(get_connection()) as conn:
@@ -231,12 +251,20 @@ async def init_user_store() -> None:
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_user_events_type_time ON user_events(event_type, event_time)"
                 )
-                for col_name, col_def in columns:
-                    try:
-                        cur.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_def}")
-                    except Exception:
-                        pass
                 cur.execute(promo_ddl)
+                cur.execute(schema_version_ddl)
+                cur.execute("SELECT MAX(version) AS v FROM schema_version")
+                row = cur.fetchone()
+                current_version = (row["v"] or 0) if row else 0
+                for idx, stmts in enumerate(MIGRATIONS, start=1):
+                    if idx <= current_version:
+                        continue
+                    for stmt in stmts:
+                        try:
+                            cur.execute(stmt)
+                        except Exception:
+                            pass
+                    cur.execute("INSERT INTO schema_version (version) VALUES (?)", (idx,))
                 conn.commit()
         await asyncio.to_thread(_s)
 

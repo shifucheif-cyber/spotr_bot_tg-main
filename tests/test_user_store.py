@@ -226,5 +226,18 @@ class TestUserStore(unittest.IsolatedAsyncioTestCase):
         details = await self.mod.get_user_details(1)
         self.assertEqual(details["subscription_status"], "inactive")
 
+    async def test_schema_version_table_created(self):
+        """init_user_store creates schema_version table."""
+        row = await self.mod._fetchone("SELECT MAX(version) AS v FROM schema_version")
+        self.assertIsNotNone(row)
+        self.assertGreaterEqual(row["v"], 1)
+
+    async def test_schema_version_idempotent(self):
+        """Running init_user_store twice doesn't re-apply migrations."""
+        v1 = await self.mod._fetchone("SELECT MAX(version) AS v FROM schema_version")
+        await self.mod.init_user_store()
+        v2 = await self.mod._fetchone("SELECT MAX(version) AS v FROM schema_version")
+        self.assertEqual(v1["v"], v2["v"])
+
 if __name__ == "__main__":
     unittest.main()

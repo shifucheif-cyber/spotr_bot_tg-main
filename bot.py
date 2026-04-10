@@ -30,6 +30,7 @@ from services.user_store import (
     check_daily_limit,
     increment_daily_request,
 )
+from services.analysis_cache import analysis_cache_key, get_cached_analysis, put_cached_analysis
 
 # --- CONFIG ---
 ENABLE_PAYWALL = os.getenv("ENABLE_PAYWALL", "false").lower() in ("true", "1", "yes")
@@ -318,6 +319,49 @@ async def fetch_match_data(match_name: str, disc: str, ctx: dict, block: str) ->
     payload = f"{data}\n\n{block}\n\n{build_annotation_block(match_name)}"
     return payload, data
 
+async def _run_analysis(message: types.Message, user_id: int, data: dict, status_msg):
+    """Background coroutine that performs the heavy analysis work."""
+    try:
+        disc = data.get('full_discipline') or data.get('discipline', 'киберспорт')
+        m = data.get('found_match') or {}
+        if m.get('home') and m.get('away'):
+            match_name = f"{m['home']} vs {m['away']}"
+        else:
+            match_name = data.get('match', 'Unknown vs Unknown')
+        ctx = {"date": m.get("date") or data.get("date") or "не указана", "league": m.get("league", ""), "sport": m.get("sport", ""), "home": m.get("home", ""), "away": m.get("away", ""), "pre_validated_sources": data.get("match_validation_sources", [])}
+
+        block = f"Матч: {match_name}\nДата: {ctx['date']}\nЛига: {ctx['league']}\n{data.get('match_validation_report', '')}"
+
+        # --- LLM cache check ---
+        cache_key = analysis_cache_key(disc, match_name, ctx["date"])
+        cached_res = get_cached_analysis(cache_key)
+        if cached_res:
+            logger.info("Analysis cache HIT for %s", match_name)
+            res = cached_res
+        else:
+            payload, _ = await fetch_match_data(match_name, disc, ctx, block)
+            full_prompt = payload
+            res = await generate_content_with_metadata(full_prompt, disc, data.get('discipline_key'))
+            if res.get("text"):
+                put_cached_analysis(cache_key, res)
+
+        if res.get("text"):
+            await record_analysis_result(user_id, discipline=disc, match_text=match_name, success=True)
+            final = format_prediction_response(match_name, res["text"])
+            for part in split_long_message(final):
+                await message.answer(part, parse_mode="HTML")
+        else:
+            await message.answer("⚠️ Нет ответа")
+    except Exception as e:
+        logger.error(f"Analysis error: {e}")
+        await message.answer("❌ Ошибка при анализе.")
+    finally:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+
 async def start_analysis(message: types.Message, state: FSMContext, *, user_id: int = None, real_user: types.User = None):
     user_id = user_id or message.from_user.id
     
@@ -332,35 +376,9 @@ async def start_analysis(message: types.Message, state: FSMContext, *, user_id: 
         await increment_daily_request(user_id)
         
     data = await state.get_data()
+    await state.clear()
     status = await message.answer("🔎 Анализирую...")
-    try:
-        disc = data.get('full_discipline') or data.get('discipline', 'киберспорт')
-        m = data.get('found_match') or {}
-        if m.get('home') and m.get('away'):
-            match_name = f"{m['home']} vs {m['away']}"
-        else:
-            match_name = data.get('match', 'Unknown vs Unknown')
-        ctx = {"date": m.get("date") or data.get("date") or "не указана", "league": m.get("league", ""), "sport": m.get("sport", ""), "home": m.get("home", ""), "away": m.get("away", ""), "pre_validated_sources": data.get("match_validation_sources", [])}
-
-        block = f"Матч: {match_name}\nДата: {ctx['date']}\nЛига: {ctx['league']}\n{data.get('match_validation_report', '')}"
-        payload, _ = await fetch_match_data(match_name, disc, ctx, block)
-        full_prompt = payload
-
-        res = await generate_content_with_metadata(full_prompt, disc, data.get('discipline_key'))
-
-        if res.get("text"):
-            await record_analysis_result(user_id, discipline=disc, match_text=match_name, success=True)
-            final = format_prediction_response(match_name, res["text"])
-            for part in split_long_message(final):
-                await message.answer(part, parse_mode="HTML")
-        else:
-            await message.answer("⚠️ Нет ответа")
-    except Exception as e:
-        logger.error(f"Analysis error: {e}")
-        await message.answer("❌ Ошибка при анализе.")
-    finally:
-        await status.delete()
-        await state.clear()
+    asyncio.create_task(_run_analysis(message, user_id, data, status))
 
 async def main():
     await init_user_store()
