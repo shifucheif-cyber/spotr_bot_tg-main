@@ -170,7 +170,9 @@ def format_response_contract(match_text: str, raw_analysis: str, prediction_stru
         html.append(f"📈 <b>Вероятность:</b> не определена")
     html.append(f"🔢 <b>Прогноз счета:</b> {_escape(exact_score) if exact_score else 'Н/Д'}")
     html.append(f"📊 <b>Ожидаемый тотал:</b> {_escape(total_prediction) if total_prediction else 'Н/Д'} ({_escape(total_recommendation) if total_recommendation else 'Н/Д'})")
-    html.append(f"💰 <b>Ставка:</b> {_escape(prediction_struct.get('recommendation', 'Н/Д'))} (Келли: {_escape(kelly_index)})")
+    simple_stake = prediction_struct.get('simple_stake', 'Н/Д')
+    html.append(f"💰 <b>Ставка:</b> {_escape(prediction_struct.get('recommendation', 'Н/Д'))}")
+    html.append(f"📏 <b>Размер:</b> рекомендация {_escape(simple_stake)} от банка | Келли: {_escape(kelly_index)}")
     html.append(f"💡 <b>Анализ:</b> {_escape(analysis_summary)}")
     return "\n".join(html)
 

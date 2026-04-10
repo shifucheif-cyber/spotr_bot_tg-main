@@ -105,5 +105,42 @@ class BettingCalculatorTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
 
 
+    # --- Total fallback tests ---
+
+    def test_total_fallback_from_exact_score(self):
+        response = '```json\n{"win_probability_team1": 60, "exact_score": "2:0"}\n```'
+        data = extract_betting_data(response)
+        self.assertEqual(data["total_prediction"], 1.5)
+        self.assertEqual(data["total_recommendation"], "ТБ 1.5")
+        self.assertEqual(data["total_value"], "1.5")
+
+    def test_total_fallback_basketball(self):
+        response = '```json\n{"win_probability_team1": 55, "exact_score": "105:98"}\n```'
+        data = extract_betting_data(response)
+        self.assertEqual(data["total_prediction"], 202.5)
+
+    def test_total_fallback_does_not_overwrite_llm(self):
+        response = '```json\n{"win_probability_team1": 60, "exact_score": "2:1", "total_prediction": 3.5}\n```'
+        data = extract_betting_data(response)
+        self.assertEqual(data["total_prediction"], 3.5)
+
+    # --- Simple stake tests ---
+
+    def test_simple_stake_high_probability(self):
+        response = '```json\n{"win_probability_team1": 85, "win_probability_team2": 15, "odds": 1.5}\n```'
+        result = get_bet_recommendation(response)
+        self.assertEqual(result["simple_stake"], "6%")
+
+    def test_simple_stake_medium_probability(self):
+        response = '```json\n{"win_probability_team1": 70, "win_probability_team2": 30, "odds": 1.8}\n```'
+        result = get_bet_recommendation(response)
+        self.assertEqual(result["simple_stake"], "3%")
+
+    def test_simple_stake_low_probability(self):
+        response = '```json\n{"win_probability_team1": 55, "win_probability_team2": 45, "odds": 2.0}\n```'
+        result = get_bet_recommendation(response)
+        self.assertEqual(result["simple_stake"], "1%")
+
+
 if __name__ == "__main__":
     unittest.main()

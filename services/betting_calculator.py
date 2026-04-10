@@ -134,6 +134,14 @@ def extract_betting_data(llm_response: str) -> dict:
                 result["total_value"] = str(result["total_prediction"])
         except Exception:
             pass
+    # Fallback: вычислить тотал из exact_score если LLM не вернул
+    if result["total_prediction"] == "Н/Д" and result["exact_score"] != "Н/Д":
+        nums = re.findall(r"\d+", result["exact_score"])
+        if nums:
+            total = sum(int(n) for n in nums) - 0.5
+            result["total_prediction"] = total
+            result["total_recommendation"] = f"ТБ {total}"
+            result["total_value"] = str(total)
     # Fallback to regex for probability
     if result["probability"] is None:
         result["probability"] = extract_probability(llm_response)
@@ -221,6 +229,18 @@ def get_bet_recommendation(llm_response: str) -> dict:
         except (ValueError, TypeError):
             pass
 
+    # Simple stake scale by winner probability
+    winner_prob = max(
+        data.get("win_probability_team1") or probability or 0,
+        data.get("win_probability_team2") or 0,
+    )
+    if winner_prob >= 80:
+        simple_stake = "6%"
+    elif winner_prob >= 60:
+        simple_stake = "3%"
+    else:
+        simple_stake = "1%"
+
     return {
         "probability": probability,
         "win_probability_team1": data.get("win_probability_team1") if data.get("win_probability_team1") is not None else probability,
@@ -228,6 +248,7 @@ def get_bet_recommendation(llm_response: str) -> dict:
         "odds": odds,
         "draw_probability": data.get("draw_probability"),
         "stake_percent": stake_percent,
+        "simple_stake": simple_stake,
         "confidence_score": data.get("confidence_score"),
         "analysis_summary": data.get("analysis_summary"),
         "exact_score": data.get("exact_score", "Н/Д"),

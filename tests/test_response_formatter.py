@@ -88,5 +88,26 @@ class ResponseFormatterTests(unittest.TestCase):
         self.assertEqual(parts[2], "Z" * 70)
 
 
+    def test_format_response_contract_shows_simple_stake(self):
+        prediction = {
+            "winner": "Team A",
+            "win_probability_team1": 70,
+            "win_probability_team2": 30,
+            "exact_score": "2:1",
+            "total_prediction": 2.5,
+            "total_recommendation": "ТБ 2.5",
+            "stake_percent": "3%",
+            "simple_stake": "3%",
+            "analysis_summary": "Test",
+            "recommendation": "Ставка",
+        }
+
+        html = format_response_contract("Team A vs Team B", "Winner: Team A", prediction)
+
+        self.assertIn("📏 <b>Размер:</b>", html)
+        self.assertIn("рекомендация 3%", html)
+        self.assertIn("Келли:", html)
+
+
 if __name__ == "__main__":
     unittest.main()
