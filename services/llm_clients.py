@@ -8,8 +8,17 @@
 
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_error(exc: Exception) -> str:
+    """Remove potential API keys from error messages."""
+    msg = str(exc)
+    msg = re.sub(r'(sk-|gsk-|Bearer\s)\S+', '[REDACTED]', msg)
+    msg = re.sub(r'key["\']?\s*[:=]\s*\S+', 'key=[REDACTED]', msg, flags=re.IGNORECASE)
+    return msg
 
 # --- результаты bootstrap ---
 google_client = None
@@ -86,8 +95,8 @@ def init_llm_clients() -> dict[str, str]:
                 http_options=genai_types.HttpOptions(api_version=GOOGLE_API_VERSION),
             )
         except Exception as e:
-            init_errors["google"] = str(e)
-            logger.debug("Google client init failed: %s", e)
+            init_errors["google"] = _sanitize_error(e)
+            logger.debug("Google client init failed: %s", _sanitize_error(e))
     else:
         init_errors["google"] = "API key not configured"
 
@@ -99,8 +108,8 @@ def init_llm_clients() -> dict[str, str]:
 
             groq_client = AsyncGroq(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL or None)
         except Exception as e:
-            init_errors["groq"] = str(e)
-            logger.debug("Groq client init failed: %s", e)
+            init_errors["groq"] = _sanitize_error(e)
+            logger.debug("Groq client init failed: %s", _sanitize_error(e))
     else:
         init_errors["groq"] = "API key not configured"
 
@@ -112,8 +121,8 @@ def init_llm_clients() -> dict[str, str]:
 
             deepseek_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
         except Exception as e:
-            init_errors["deepseek"] = str(e)
-            logger.debug("DeepSeek client init failed: %s", e)
+            init_errors["deepseek"] = _sanitize_error(e)
+            logger.debug("DeepSeek client init failed: %s", _sanitize_error(e))
     else:
         init_errors["deepseek"] = "API key not configured"
 
@@ -125,8 +134,8 @@ def init_llm_clients() -> dict[str, str]:
 
             sambanova_client = AsyncOpenAI(api_key=SAMBANOVA_API_KEY, base_url=SAMBANOVA_BASE_URL)
         except Exception as e:
-            init_errors["sambanova"] = str(e)
-            logger.debug("SambaNova client init failed: %s", e)
+            init_errors["sambanova"] = _sanitize_error(e)
+            logger.debug("SambaNova client init failed: %s", _sanitize_error(e))
     else:
         init_errors["sambanova"] = "API key not configured"
 

@@ -1,13 +1,18 @@
 """Tests for services.match_finder — match parsing and discipline normalization."""
+import asyncio
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch, AsyncMock
 
+from services import match_finder
 from services.match_finder import (
     parse_match_teams,
     parse_date,
     normalize_discipline,
     create_fallback_match_data,
     get_discipline_for_sport,
+    check_match_clarification,
+    cleanup_match_cache,
 )
 
 
@@ -84,6 +89,46 @@ class TestCreateFallbackMatchData(unittest.TestCase):
         data = create_fallback_match_data("Team A vs Team B", "10 апреля", "футбол")
         self.assertIsInstance(data, dict)
         self.assertIn("sport", data)
+
+
+class TestMatchClarificationCache(unittest.TestCase):
+    def setUp(self):
+        match_finder._match_clarif_cache.clear()
+
+    def tearDown(self):
+        match_finder._match_clarif_cache.clear()
+
+    @patch("services.match_finder.find_matches_by_teams", new_callable=AsyncMock)
+    def test_cache_hit(self, mock_find):
+        mock_find.return_value = []
+        # First call — hits API
+        r1 = asyncio.run(check_match_clarification("A vs B", "11.04.26", "football"))
+        self.assertEqual(mock_find.call_count, 1)
+        # Second call — cache hit
+        r2 = asyncio.run(check_match_clarification("A vs B", "11.04.26", "football"))
+        self.assertEqual(mock_find.call_count, 1)  # no new call
+        self.assertEqual(r1, r2)
+
+    @patch("services.match_finder.find_matches_by_teams", new_callable=AsyncMock)
+    def test_none_result_cached(self, mock_find):
+        mock_find.return_value = []
+        r1 = asyncio.run(check_match_clarification("X vs Y", "11.04.26", "cs2"))
+        self.assertIsNone(r1)
+        self.assertEqual(len(match_finder._match_clarif_cache), 1)
+
+    def test_cleanup_match_cache(self):
+        match_finder._match_clarif_cache["old"] = {
+            "result": None,
+            "ts": datetime.now(tz=timezone.utc) - timedelta(hours=49),
+        }
+        match_finder._match_clarif_cache["fresh"] = {
+            "result": {"status": "ok"},
+            "ts": datetime.now(tz=timezone.utc),
+        }
+        removed = cleanup_match_cache()
+        self.assertEqual(removed, 1)
+        self.assertNotIn("old", match_finder._match_clarif_cache)
+        self.assertIn("fresh", match_finder._match_clarif_cache)
 
 
 if __name__ == "__main__":

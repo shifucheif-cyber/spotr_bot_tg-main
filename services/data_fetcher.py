@@ -15,13 +15,14 @@ from services.search_engine import (
     collect_discipline_data,
     check_required_data,
 )
+from services.event_phase import EventPhase, get_event_phase, get_phase_ttl, is_event_expired
 
 logger = logging.getLogger(__name__)
 
 # ── Match analysis cache ──
 # Key: hash(discipline, sorted participants) → {"result": str, "ts": datetime}
 _match_cache: Dict[str, Dict[str, Any]] = {}
-_CACHE_TTL = timedelta(days=3)  # кэш: события старше 3 дней удаляются
+_DEFAULT_SEARCH_TTL = timedelta(hours=24)
 _CACHE_MAX = 200
 _cache_lock = threading.Lock()
 
@@ -33,12 +34,13 @@ def _cache_key(discipline: str, side1: str, side2: str, match_date: str = "") ->
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def _get_cached(key: str) -> Optional[str]:
+def _get_cached(key: str, phase: EventPhase | None = None) -> Optional[str]:
+    ttl = get_phase_ttl(phase) if phase is not None else _DEFAULT_SEARCH_TTL
     with _cache_lock:
         entry = _match_cache.get(key)
         if not entry:
             return None
-        if datetime.now(tz=timezone.utc) - entry["ts"] > _CACHE_TTL:
+        if datetime.now(tz=timezone.utc) - entry["ts"] > ttl:
             del _match_cache[key]
             return None
         logger.info("Cache hit for match analysis (key=%s)", key[:8])
@@ -110,11 +112,25 @@ async def fetch_match_analysis_data(
     side1, side2 = teams[0].strip(), teams[1].strip()
     logger.info(f"[FETCH] Участники: side1={side1}, side2={side2}")
 
-    # ── Проверяем кэш (одинаковые участники + дисциплина + дата) ──
+    # ── Проверяем фазу события и кэш ──
     discipline = getattr(fetcher, '_discipline', None) or getattr(fetcher, 'game_key', None) or fetcher.__class__.__name__.replace('Fetcher', '').lower()
     match_date = (match_context or {}).get("date", "")
+    phase = get_event_phase(match_date, discipline)
     cache_k = _cache_key(discipline, side1, side2, match_date)
-    cached = _get_cached(cache_k)
+
+    # Block expired events
+    if is_event_expired(phase):
+        return "⛔ Событие завершено более 24ч назад. Анализ неактуален."
+
+    # Finished events — serve cache ≤48h or message
+    if phase is EventPhase.FINISHED:
+        cached = _get_cached(cache_k, phase=phase)
+        if cached is not None:
+            logger.info("[FETCH] Event FINISHED, returning cached data (≤48h)")
+            return cached
+        return "⚠️ Событие завершено. Данные устарели, уточните запрос."
+
+    cached = _get_cached(cache_k, phase=phase)
     if cached is not None:
         logger.info(f"[FETCH] Найден кэш для ключа: {cache_k}")
         return cached
@@ -153,12 +169,13 @@ async def fetch_match_analysis_data(
 
 
 def cleanup_expired_cache() -> int:
-    """Удаляет устаревшие записи кэша. Возвращает количество удалённых."""
+    """Удаляет записи старше 48ч (макс. возможный TTL). Возвращает количество удалённых."""
+    max_ttl = timedelta(hours=48)
     with _cache_lock:
         now = datetime.now(tz=timezone.utc)
-        expired = [k for k, v in _match_cache.items() if now - v["ts"] > _CACHE_TTL]
+        expired = [k for k, v in _match_cache.items() if now - v["ts"] > max_ttl]
         for k in expired:
             del _match_cache[k]
         if expired:
-            logger.info("Cache cleanup: removed %d expired entries, %d remaining", len(expired), len(_match_cache))
+            logger.info("Data cache cleanup: removed %d expired entries, %d remaining", len(expired), len(_match_cache))
         return len(expired)

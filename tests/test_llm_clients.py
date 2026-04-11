@@ -70,5 +70,36 @@ class TestInitLlmClients(unittest.TestCase):
             self.assertEqual(mod.GROQ_API_KEY, "test-key-123")
 
 
+class TestSanitizeError(unittest.TestCase):
+    """Tests for _sanitize_error() API key redaction."""
+
+    def test_redacts_sk_key(self):
+        from services.llm_clients import _sanitize_error
+        err = Exception("Invalid API key: sk-1234567890abcdef")
+        self.assertIn("[REDACTED]", _sanitize_error(err))
+        self.assertNotIn("sk-1234567890", _sanitize_error(err))
+
+    def test_redacts_gsk_key(self):
+        from services.llm_clients import _sanitize_error
+        err = Exception("Auth failed: gsk-secret-key-here")
+        self.assertIn("[REDACTED]", _sanitize_error(err))
+        self.assertNotIn("gsk-secret", _sanitize_error(err))
+
+    def test_redacts_bearer_token(self):
+        from services.llm_clients import _sanitize_error
+        err = Exception("Bearer sk-abcdef123 is invalid")
+        self.assertIn("[REDACTED]", _sanitize_error(err))
+
+    def test_redacts_key_equals_pattern(self):
+        from services.llm_clients import _sanitize_error
+        err = Exception("api_key=sk-secret-123")
+        self.assertIn("[REDACTED]", _sanitize_error(err))
+
+    def test_preserves_safe_message(self):
+        from services.llm_clients import _sanitize_error
+        err = Exception("Connection timeout after 10s")
+        self.assertEqual(_sanitize_error(err), "Connection timeout after 10s")
+
+
 if __name__ == "__main__":
     unittest.main()

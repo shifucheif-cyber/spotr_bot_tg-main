@@ -1,9 +1,11 @@
 """Tests for services.external_source — TheSportsDB integration."""
 import asyncio
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import httpx
+from services import external_source
 
 
 def run_async(coro):
@@ -82,6 +84,67 @@ class TestSearchEventTheSportsDB(unittest.TestCase):
         from services.external_source import search_event_thesportsdb
         result = run_async(search_event_thesportsdb("Team A vs Team B"))
         self.assertIsNone(result)
+
+
+class TestTeamIdCache(unittest.TestCase):
+    def setUp(self):
+        external_source._team_id_cache.clear()
+
+    def tearDown(self):
+        external_source._team_id_cache.clear()
+
+    @patch("services.external_source.httpx.AsyncClient")
+    def test_cache_hit_no_http(self, MockAsyncClient):
+        """Second call should use cache, not HTTP."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"teams": [{"idTeam": "12345"}]}
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_client
+        mock_cm.__aexit__.return_value = False
+        MockAsyncClient.return_value = mock_cm
+
+        result1 = run_async(external_source._search_team_id("Manchester United"))
+        self.assertEqual(result1, "12345")
+        self.assertEqual(mock_client.get.call_count, 1)
+
+        # Second call — cache hit
+        result2 = run_async(external_source._search_team_id("Manchester United"))
+        self.assertEqual(result2, "12345")
+        self.assertEqual(mock_client.get.call_count, 1)  # no new HTTP call
+
+    @patch("services.external_source.httpx.AsyncClient")
+    def test_none_not_cached(self, MockAsyncClient):
+        """None results should not be cached."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"teams": None}
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_client
+        mock_cm.__aexit__.return_value = False
+        MockAsyncClient.return_value = mock_cm
+
+        result = run_async(external_source._search_team_id("Nonexistent Team"))
+        self.assertIsNone(result)
+        self.assertEqual(len(external_source._team_id_cache), 0)
+
+    def test_cleanup_team_cache(self):
+        external_source._team_id_cache["old"] = {
+            "result": "123",
+            "ts": datetime.now(tz=timezone.utc) - timedelta(hours=49),
+        }
+        external_source._team_id_cache["fresh"] = {
+            "result": "456",
+            "ts": datetime.now(tz=timezone.utc),
+        }
+        removed = external_source.cleanup_team_cache()
+        self.assertEqual(removed, 1)
+        self.assertNotIn("old", external_source._team_id_cache)
+        self.assertIn("fresh", external_source._team_id_cache)
 
 
 if __name__ == "__main__":

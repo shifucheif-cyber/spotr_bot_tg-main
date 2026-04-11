@@ -31,9 +31,29 @@ from services.user_store import (
     increment_daily_request,
 )
 from services.analysis_cache import analysis_cache_key, get_cached_analysis, put_cached_analysis
+from services.event_phase import EventPhase, get_event_phase, is_event_expired
 
 # --- CONFIG ---
 ENABLE_PAYWALL = os.getenv("ENABLE_PAYWALL", "false").lower() in ("true", "1", "yes")
+_ANALYSIS_TIMEOUT = int(os.getenv("ANALYSIS_TIMEOUT", "300"))
+_user_semaphores: dict[int, asyncio.Semaphore] = {}
+
+
+def _sanitize_user_input(text: str, max_len: int = 100) -> str | None:
+    """Validate and sanitize user-supplied text (team names, etc.).
+
+    Returns cleaned text or None if invalid.
+    """
+    if not text:
+        return None
+    # Remove control characters except space
+    cleaned = "".join(c for c in text if c == " " or (c.isprintable() and ord(c) >= 0x20))
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len]
+    return cleaned
 MAX_FREE_REQUESTS = int(os.getenv("MAX_FREE_REQUESTS", "3"))
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
@@ -269,7 +289,10 @@ async def set_subdiscipline(message: types.Message, state: FSMContext):
 async def set_team1(message: types.Message, state: FSMContext):
     data = await state.get_data()
     disc = data.get('full_discipline') or data.get('discipline', '')
-    raw = message.text.strip()
+    raw = _sanitize_user_input(message.text)
+    if not raw:
+        await message.answer("❌ Название слишком длинное или содержит недопустимые символы. Попробуйте ещё.")
+        return
     sides = split_match_text(raw)
     if len(sides) == 2:
         t1_res = resolve_entity_name(sides[0], discipline=disc)
@@ -288,7 +311,11 @@ async def set_team1(message: types.Message, state: FSMContext):
 async def set_team2(message: types.Message, state: FSMContext):
     data = await state.get_data()
     disc = data.get('full_discipline') or data.get('discipline', '')
-    t2_res = resolve_entity_name(message.text.strip(), discipline=disc)
+    raw = _sanitize_user_input(message.text)
+    if not raw:
+        await message.answer("❌ Название слишком длинное или содержит недопустимые символы. Попробуйте ещё.")
+        return
+    t2_res = resolve_entity_name(raw, discipline=disc)
     match = resolve_match_entities(data['team1'], t2_res["corrected"], discipline=disc)
     await state.update_data(team1=match["team1"]["corrected"], team2=match["team2"]["corrected"], match=match["match"])
     await message.answer(f"🏆 {match['match']}\n{format_name_correction('Т2', t2_res)}\n📅 Дата:", reply_markup=get_date_keyboard())
@@ -332,9 +359,25 @@ async def _run_analysis(message: types.Message, user_id: int, data: dict, status
 
         block = f"Матч: {match_name}\nДата: {ctx['date']}\nЛига: {ctx['league']}\n{data.get('match_validation_report', '')}"
 
+        # --- Event phase check ---
+        phase = get_event_phase(ctx["date"], disc)
+        if is_event_expired(phase):
+            await message.answer("⛔ Событие завершено более 24ч назад, анализ неактуален.")
+            return
+        if phase is EventPhase.FINISHED:
+            cache_key = analysis_cache_key(disc, match_name, ctx["date"])
+            cached_res = get_cached_analysis(cache_key, phase=phase)
+            if cached_res and cached_res.get("text"):
+                final = format_prediction_response(match_name, cached_res["text"])
+                for part in split_long_message(f"⚠️ Событие завершено. Последний доступный анализ:\n\n{final}"):
+                    await message.answer(part, parse_mode="HTML")
+            else:
+                await message.answer("⚠️ Событие завершено. Данные устарели, уточните запрос.")
+            return
+
         # --- LLM cache check ---
         cache_key = analysis_cache_key(disc, match_name, ctx["date"])
-        cached_res = get_cached_analysis(cache_key)
+        cached_res = get_cached_analysis(cache_key, phase=phase)
         if cached_res:
             logger.info("Analysis cache HIT for %s", match_name)
             res = cached_res
@@ -352,8 +395,11 @@ async def _run_analysis(message: types.Message, user_id: int, data: dict, status
                 await message.answer(part, parse_mode="HTML")
         else:
             await message.answer("⚠️ Нет ответа")
+    except asyncio.TimeoutError:
+        logger.warning("Analysis timeout for user %s", user_id)
+        await message.answer("⏱️ Анализ превысил максимальное время. Попробуйте позже.")
     except Exception as e:
-        logger.error(f"Analysis error: {e}")
+        logger.exception("Analysis error for user %s: %s", user_id, e)
         await message.answer("❌ Ошибка при анализе.")
     finally:
         try:
@@ -377,8 +423,39 @@ async def start_analysis(message: types.Message, state: FSMContext, *, user_id: 
         
     data = await state.get_data()
     await state.clear()
+
+    # One concurrent analysis per user
+    sem = _user_semaphores.setdefault(user_id, asyncio.Semaphore(1))
+    if sem.locked():
+        await message.answer("⏳ Анализ уже выполняется, подождите.")
+        return
+
     status = await message.answer("🔎 Анализирую...")
-    asyncio.create_task(_run_analysis(message, user_id, data, status))
+
+    async def _guarded_analysis():
+        async with sem:
+            await asyncio.wait_for(
+                _run_analysis(message, user_id, data, status),
+                timeout=_ANALYSIS_TIMEOUT,
+            )
+
+    asyncio.create_task(_guarded_analysis())
+
+async def _periodic_cache_cleanup():
+    """Hourly cleanup of all in-memory caches."""
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            from services.analysis_cache import cleanup_expired_cache as _cleanup_analysis
+            from services.data_fetcher import cleanup_expired_cache as _cleanup_data
+            from services.external_source import cleanup_team_cache as _cleanup_teams
+            from services.match_finder import cleanup_match_cache as _cleanup_matches
+            total = _cleanup_analysis() + _cleanup_data() + _cleanup_teams() + _cleanup_matches()
+            if total:
+                logger.info("Periodic cache cleanup: removed %d entries total", total)
+        except Exception as e:
+            logger.error("Cache cleanup error: %s", e)
+
 
 async def main():
     await init_user_store()
@@ -394,8 +471,10 @@ async def main():
         for m in messages:
             logger.info(m)
 
+    cleanup_task = None
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        cleanup_task = asyncio.create_task(_periodic_cache_cleanup())
         await dp.start_polling(bot)
     except (Exception,) as e:
         err_name = type(e).__name__
@@ -404,7 +483,19 @@ async def main():
         else:
             raise
     finally:
+        if cleanup_task:
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
         await bot.session.close()
+        try:
+            from services.user_store import close_pool
+            await close_pool()
+        except Exception:
+            pass
+        logger.info("Bot shutdown complete")
 
 if __name__ == "__main__":
     asyncio.run(main())

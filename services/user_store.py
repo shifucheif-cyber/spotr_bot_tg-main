@@ -27,6 +27,22 @@ async def _get_pool():
     return _pg_pool
 
 
+async def close_pool():
+    """Close PostgreSQL connection pool if open."""
+    global _pg_pool
+    if _pg_pool is not None:
+        await _pg_pool.close()
+        _pg_pool = None
+
+
+async def close_pool():
+    """Close PostgreSQL connection pool if open."""
+    global _pg_pool
+    if _pg_pool is not None:
+        await _pg_pool.close()
+        _pg_pool = None
+
+
 def _q(sql: str) -> str:
     """Convert '?' placeholders to '$1, $2, ...' for asyncpg."""
     if DB_BACKEND != "postgres":
@@ -212,6 +228,8 @@ async def init_user_store() -> None:
     MIGRATIONS = [
         # Version 1: add daily_requests, last_request_date, promo columns
         [f"ALTER TABLE users ADD COLUMN {col} {defn}" for col, defn in columns],
+        # Version 2: add platform column for multi-messenger support
+        ["ALTER TABLE users ADD COLUMN platform TEXT NOT NULL DEFAULT 'tg'"],
     ]
 
     if DB_BACKEND == "postgres":
@@ -332,20 +350,21 @@ async def increment_daily_request(telegram_user_id: int) -> None:
         await asyncio.to_thread(_s)
 
 
-async def upsert_user(user: Any, admin_telegram_id: Optional[int] = None) -> None:
+async def upsert_user(user: Any, admin_telegram_id: Optional[int] = None, platform: str = "tg") -> None:
     timestamp = utc_now()
     is_admin = int(bool(admin_telegram_id and user.id == admin_telegram_id))
     await _execute(
         """
         INSERT INTO users (
-            telegram_user_id, username, first_name, last_name, first_seen, last_seen, is_admin
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            telegram_user_id, username, first_name, last_name, first_seen, last_seen, is_admin, platform
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(telegram_user_id) DO UPDATE SET
             username=excluded.username,
             first_name=excluded.first_name,
             last_name=excluded.last_name,
             last_seen=excluded.last_seen,
-            is_admin=excluded.is_admin
+            is_admin=excluded.is_admin,
+            platform=excluded.platform
         """,
         (
             user.id,
@@ -355,6 +374,7 @@ async def upsert_user(user: Any, admin_telegram_id: Optional[int] = None) -> Non
             timestamp,
             timestamp,
             is_admin,
+            platform,
         ),
     )
 
@@ -366,8 +386,9 @@ async def touch_user(
     increment_requests: bool = False,
     discipline: Optional[str] = None,
     match_text: Optional[str] = None,
+    platform: str = "tg",
 ) -> None:
-    await upsert_user(user, admin_telegram_id=admin_telegram_id)
+    await upsert_user(user, admin_telegram_id=admin_telegram_id, platform=platform)
     parts = ["last_seen = ?"]
     values: List[Any] = [utc_now()]
     if increment_requests:

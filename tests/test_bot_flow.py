@@ -173,5 +173,58 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("⭐ Премиум", first_row_texts)
 
 
+class TestSanitizeUserInput(unittest.TestCase):
+    """Tests for bot._sanitize_user_input()."""
+
+    def test_normal_text(self):
+        self.assertEqual(bot._sanitize_user_input("Зенит"), "Зенит")
+
+    def test_strips_whitespace(self):
+        self.assertEqual(bot._sanitize_user_input("  CSKA  "), "CSKA")
+
+    def test_truncates_long_text(self):
+        long = "A" * 200
+        result = bot._sanitize_user_input(long)
+        self.assertEqual(len(result), 100)
+
+    def test_removes_control_chars(self):
+        self.assertEqual(bot._sanitize_user_input("Team\x00\x01A"), "TeamA")
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(bot._sanitize_user_input(""))
+        self.assertIsNone(bot._sanitize_user_input(None) if False else bot._sanitize_user_input(""))
+
+    def test_only_control_chars_returns_none(self):
+        self.assertIsNone(bot._sanitize_user_input("\x00\x01\x02"))
+
+    def test_custom_max_len(self):
+        result = bot._sanitize_user_input("A" * 50, max_len=20)
+        self.assertEqual(len(result), 20)
+
+
+class TestAnalysisSemaphore(unittest.IsolatedAsyncioTestCase):
+    """Tests for user semaphore in start_analysis."""
+
+    async def test_blocks_concurrent_analysis(self):
+        """If semaphore locked, user gets wait message."""
+        user_id = 99999
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()  # Lock it
+        bot._user_semaphores[user_id] = sem
+
+        msg = AsyncMock()
+        msg.from_user = SimpleNamespace(id=user_id)
+        state = FakeState({"discipline": "football", "team1": "A", "team2": "B"})
+
+        with patch.object(bot, "check_daily_limit", new=AsyncMock(return_value=True)), \
+             patch.object(bot, "touch_user", new=AsyncMock()), \
+             patch.object(bot, "increment_daily_request", new=AsyncMock()):
+            await bot.start_analysis(msg, state, user_id=user_id)
+
+        msg.answer.assert_called_with("⏳ Анализ уже выполняется, подождите.")
+        sem.release()
+        bot._user_semaphores.pop(user_id, None)
+
+
 if __name__ == "__main__":
     unittest.main()

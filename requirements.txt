@@ -1,16 +1,43 @@
-aiogram
-pytz
-httpx>=0.24.0
-google-genai
-groq
-openai
+# =====================================================================
+# Для деплоя на Ubuntu 22.04 сначала установи системные зависимости:
+#
+#   sudo apt update && sudo apt install -y python3-pip python3-venv \
+#       postgresql postgresql-contrib libpq-dev
+#
+# Создание БД PostgreSQL:
+#   sudo -u postgres createuser --pwprompt spotr_bot
+#   sudo -u postgres createdb -O spotr_bot spotr_bot_db
+#
+# В .env укажи:
+#   DB_BACKEND=postgres
+#   DATABASE_URL=postgresql://spotr_bot:<пароль>@localhost:5432/spotr_bot_db
+# =====================================================================
+
+# --- Core ---
+aiogram>=3.18,<4.0
+pytz>=2025.1
+python-dotenv>=1.1.0
+
+# --- HTTP ---
+httpx>=0.28.0,<1.0
+
+# --- LLM clients ---
+google-genai>=1.14,<2.0
+groq>=0.25.0,<1.0
+openai>=1.70,<2.0
+
+# --- Search & scraping ---
+beautifulsoup4>=4.13
+lxml>=5.3
+ddgs>=7.0
+
+# --- Поиск (SDK не импортируются — API вызываются через httpx, но оставлены на будущее) ---
+tavily-python>=0.5.0
+exa-py>=1.8
+
+# --- Спортивные данные (зарезервированы) ---
 hltv
 sportsipy
-python-dotenv
-beautifulsoup4
-lxml
-ddgs
-tavily-python
-exa-py
-# PostgreSQL (production)
-asyncpg
+
+# --- PostgreSQL (production) ---
+asyncpg>=0.30.0,<1.0

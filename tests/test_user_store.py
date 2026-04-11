@@ -111,6 +111,26 @@ class TestUserStore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(details["last_discipline"], "хоккей")
         self.assertEqual(details["last_match"], "A vs B")
 
+    async def test_touch_user_default_platform_tg(self):
+        user = self._fake_user()
+        await self.mod.touch_user(user)
+        conn = self.mod.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT platform FROM users WHERE telegram_user_id = 1")
+        row = cur.fetchone()
+        conn.close()
+        self.assertEqual(row[0], "tg")
+
+    async def test_touch_user_custom_platform(self):
+        user = self._fake_user()
+        await self.mod.touch_user(user, platform="vk")
+        conn = self.mod.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT platform FROM users WHERE telegram_user_id = 1")
+        row = cur.fetchone()
+        conn.close()
+        self.assertEqual(row[0], "vk")
+
     @patch('services.user_store.get_msk_now')
     async def test_daily_limit_fresh_user(self, mock_now):
         mock_now.return_value = datetime(2026, 4, 9, 10, 0, 0, tzinfo=MSK_TZ)

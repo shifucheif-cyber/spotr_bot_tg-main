@@ -29,7 +29,8 @@
 
 - `llm_clients.py` — единый bootstrap LLM-клиентов (Google, Groq/AsyncGroq, DeepSeek/AsyncOpenAI, SambaNova/AsyncOpenAI). Groq и Google используют нативные async-клиенты. Инициализирует клиентов из env, при ошибке сохраняет причину в `init_errors` без WARNING-логов. Подробная диагностика — через `get_init_report()` и уровень `DEBUG`.
 - `basketball_service.py`, `football_service.py`, `hockey_service.py`, `tennis_service.py`, `table_tennis_service.py`, `volleyball_service.py`, `mma_service.py`, `cs2_service.py` — сбор и агрегация данных по конкретной дисциплине.
-- `data_fetcher.py` — маршрутизация сбора данных по дисциплинам. Fetcher-классы — маркеры дисциплин (только атрибут `_discipline`). `fetch_match_analysis_data` — единая точка входа, делегирующая в `collect_discipline_data()`.
+- `data_fetcher.py` — маршрутизация сбора данных по дисциплинам. Fetcher-классы — маркеры дисциплин (только атрибут `_discipline`). `fetch_match_analysis_data` — единая точка входа, делегирующая в `collect_discipline_data()`. Блокирует запросы для завершённых событий (фаза FINISHED/EXPIRED).
+- `event_phase.py` — определение фазы жизненного цикла события (EARLY → PRE_MATCH → LIVE → FINISHED → EXPIRED). Фазовый TTL для кэшей поиска и LLM. Длительность событий по дисциплинам (football=2ч, hockey=3ч, tennis=4ч и т.д.).
 - `search_engine.py` — универсальный слой поиска (полностью async). Тонкий оркестровщик: пайплайн-функции + реэкспорт имён из `search_providers/`. `collect_discipline_data()` — основной пайплайн: Serper#1(min) → Serper#2(max) → `check_required_data()` → Tavily/Exa(если missing) → DDG(fallback если Serper недоступен). `validate_match_request()` — async DDG-валидация события. `collect_validated_sources()` — async-каскад для валидации.
 
 ### Каталог services/search_providers/
@@ -44,8 +45,8 @@
 - `response_formatter.py` — форматирование финального ответа для Telegram, разбивка длинных сообщений.
 - `external_source.py` — async-работа с внешними источниками данных (TheSportsDB и др.), использует `httpx.AsyncClient`.
 - `logging_utils.py` — конфигурация логирования: подавление шумных внешних логгеров (httpx, groq, openai, google_genai), настройка уровней через env.
-- `user_store.py` — работа с БД пользователей (SQLite / PostgreSQL): учёт запросов, статистика, администрирование, промо-коды, подписки. **Полностью async** — PostgreSQL через `asyncpg.create_pool()`, SQLite через `asyncio.to_thread()`. Бэкенд выбирается через env `DB_BACKEND` (`postgres` по умолчанию, `sqlite` для dev/тестов). При PostgreSQL используется `DATABASE_URL`. Preflight-проверка не пропустит запуск без `DATABASE_URL` при postgres-бэкенде.
-- `payment_service.py` — заготовка верификации платежей (RUB, USDT по 7 сетям). Все функции — заглушки до интеграции с платёжными провайдерами.
+- `user_store.py` — работа с БД пользователей (SQLite / PostgreSQL): учёт запросов, статистика, администрирование, промо-коды, подписки. **Полностью async** — PostgreSQL через `asyncpg.create_pool()`, SQLite через `asyncio.to_thread()`. Бэкенд выбирается через env `DB_BACKEND` (`postgres` по умолчанию, `sqlite` для dev/тестов). Поле `platform` (дефолт `'tg'`) — заготовка для мультиплатформенности (VK, MAX).
+- `payment_service.py` — заготовка верификации платежей (RUB, USDT по 7 сетям, Telegram Stars). Функции — заглушки до интеграции с платёжными провайдерами и TG Wallet API.
 - `prompts.py` — загрузка и подготовка промптов для LLM из каталога `prompts/`.
 - `e2e_summary.py` — сбор и вывод итоговой E2E-статистики.
 - `name_normalizer.py` — нормализация и коррекция названий команд и игроков.
@@ -57,11 +58,13 @@ Markdown-файлы с промптами для разных дисциплин
 
 ### Каталог tests/
 
-Юнит-тесты (159 тестов):
+Юнит-тесты (245 тестов):
 
+- `test_event_phase.py` — фазовая модель событий, TTL, блокировка, форматы дат, длительности дисциплин.
+- `test_analysis_cache.py` — кэш LLM-анализов, фазовый TTL, cleanup.
+- `test_data_fetcher_cache.py` — кэш поисковых данных, фазовый TTL, cleanup.
 - `test_betting_calculator.py` — расчёт вероятностей и рекомендаций.
 - `test_bot_flow.py` — FSM-переходы и обработчики бота.
-- `test_data_fetcher_cache.py` — кэширование data_fetcher.
 - `test_data_router.py` — маршрутизация по дисциплинам.
 - `test_response_formatter.py` — форматирование ответов.
 - `test_search_engine.py` — поиск, валидация, `check_required_data` (all/none/partial/empty/case).
@@ -69,17 +72,17 @@ Markdown-файлы с промптами для разных дисциплин
 - `test_preflight.py` — проверка окружения (PASS/WARN/FAIL).
 - `test_prompts.py` — загрузка промптов, наличие файлов.
 - `test_name_normalizer.py` — нормализация имён, транслитерация.
-- `test_match_finder.py` — парсинг команд, дат (с учетом таймзоны МСК), дисциплин.
-- `test_user_store.py` — CRUD пользователей, событий, миграции схемы (SQLite/PostgreSQL), суточные лимиты, промо-коды, подписки, доступ.
-- `test_payment_service.py` — заглушки платёжного сервиса (RUB, USDT, неподдерживаемые сети).
-- `test_external_source.py` — TheSportsDB API (mock httpx).
+- `test_match_finder.py` — парсинг команд, дат (с учетом таймзоны МСК), дисциплин, кэш валидации.
+- `test_user_store.py` — CRUD пользователей, событий, миграции схемы (SQLite/PostgreSQL), суточные лимиты, промо-коды, подписки, доступ, поле platform.
+- `test_payment_service.py` — заглушки платёжного сервиса (RUB, USDT, Telegram Stars, неподдерживаемые сети).
+- `test_external_source.py` — TheSportsDB API (mock httpx), кэш team_id.
 - `test_logging_utils.py` — конфигурация логирования.
 - `test_e2e_summary.py` — E2E-телеметрия.
 - `test_sport_services.py` — все спортивные сервисы (8 дисциплин).
 - `test_discipline_config.py` — конфигурация дисциплин, шаблоны запросов.
 - `test_collect_discipline_data.py` — пайплайн сбора данных (Serper→check_required→Tavily/Exa→DDG).
 
-Запуск: `python -m unittest discover -s tests -p "test_*.py"`
+Запуск: `python -m pytest tests/` или `python -m unittest discover -s tests -p "test_*.py"`
 
 ## Процесс обработки запроса
 
@@ -99,6 +102,29 @@ Markdown-файлы с промптами для разных дисциплин
 Порядок: `groq → sambanova → google → deepseek` — **round-robin ротация**: каждый вызов начинается с нового провайдера (циклический сдвиг счётчиком `itertools.count()`). При ошибке — следующий по кругу.
 
 Каждый провайдер пробуется с таймаутом 60 с (Groq — 15 с для быстрого failover). При неудаче — следующий. Если все упали — пользователю возвращается сообщение об ошибке. Инициализация клиентов вынесена в `services/llm_clients.py` и не генерирует WARNING-логов при старте — ошибки сохраняются тихо и проявляются только при фактическом вызове или в preflight-отчёте.
+
+## Кэширование
+
+4 уровня in-memory кэша с **фазовым TTL** на основе жизненного цикла события (`services/event_phase.py`):
+
+| Фаза | Условие | TTL | Поведение |
+| ------ | --------- | ----- | ----------- |
+| EARLY | >12ч до начала | 7 дней | Один запрос — потом кэш до PRE_MATCH |
+| PRE_MATCH | ≤12ч до начала | 2ч | Обновление каждые 2ч |
+| LIVE | во время события | 0 | Всегда свежий запрос |
+| FINISHED | 0..24ч после конца | 48ч | Кэш ≤48ч + ⚠️ или «уточните» |
+| EXPIRED | >24ч после конца | — | Полный блок ⛔ |
+
+**Уровни кэша:**
+
+1. **LLM-анализ** (`analysis_cache.py`) — кэш результатов LLM, до 100 записей, LRU-вытеснение.
+2. **Поисковые данные** (`data_fetcher.py`) — кэш данных из Serper/Tavily/Exa/DDG, до 200 записей, LRU.
+3. **Team ID** (`external_source.py`) — кэш ID команд TheSportsDB, TTL 48ч. None не кэшируется.
+4. **Валидация матча** (`match_finder.py`) — кэш `check_match_clarification()`, TTL 48ч. None кэшируется. Окно поиска: ±7 дней.
+
+**Периодическая очистка:** `_periodic_cache_cleanup()` запускается при старте бота, каждый час удаляет записи старше 48ч из всех 4 кэшей.
+
+**Блокировка завершённых событий:** при FINISHED — отдаётся кэш ≤48ч + предупреждение, или «данные устарели, уточните запрос». При EXPIRED — полный блок.
 
 ## Preflight и запуск
 
@@ -168,6 +194,15 @@ Markdown-файлы с промптами для разных дисциплин
 "total_value": "3.0"
 }
 ```
+
+## Безопасность
+
+- **Санитизация ввода:** `_sanitize_user_input()` — обрезка по длине (100 символов), удаление управляющих символов (U+0000–U+001F кроме пробела), strip. Защита от prompt injection.
+- **Редактирование ошибок:** `_sanitize_error()` — regex-маскировка API-ключей (`sk-*`, `gsk-*`, `Bearer`, `key=`) в сообщениях об ошибках LLM-клиентов.
+- **Per-user семафор:** `asyncio.Semaphore(1)` на пользователя — блокировка параллельных запросов анализа.
+- **Таймаут анализа:** `asyncio.wait_for(timeout=300)` — защита от зависших LLM-вызовов.
+- **Graceful shutdown:** корректное завершение — отмена фоновых задач, закрытие пула БД (`close_pool()`).
+- **Upper bounds в requirements.txt:** ограничение мажорных версий критичных зависимостей.
 
 ## Принципы
 

@@ -4,9 +4,11 @@ Match finder module: поиск матчей по командам и датам
 """
 
 import re
+import hashlib
 import logging
+import threading
 import pytz
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Tuple
 
 from services.name_normalizer import normalize_entity_name, resolve_match_entities, split_match_text
@@ -15,6 +17,11 @@ from services.external_source import search_upcoming_events_by_team
 logger = logging.getLogger(__name__)
 
 MSK_TZ = pytz.timezone('Europe/Moscow')
+
+# ── Match clarification cache ──
+_match_clarif_cache: dict[str, dict] = {}
+_MATCH_CACHE_TTL = timedelta(hours=48)
+_match_cache_lock = threading.Lock()
 
 def get_msk_now() -> datetime:
     """Возвращает текущее время по Москве."""
@@ -137,7 +144,7 @@ async def find_matches_by_teams(
     team2: Optional[str],
     target_date: Optional[datetime] = None,
     discipline: Optional[str] = None,
-    days_range: int = 3
+    days_range: int = 7
 ) -> list:
     """
     Ищет матч по командам на дату запроса или в близлежащие дни.
@@ -164,17 +171,41 @@ async def check_match_clarification(
     user_discipline: str,
 ) -> Optional[Dict]:
     """
-    Проверяет, нужны ли уточнения перед анализом.
-    Возвращает информацию об уточнении или None, если всё в порядке.
-    
-    Args:
-        match_text: Текст матча (например, "FaZe vs Vitality")
-        date_text: Текст даты
-        user_discipline: Указанная пользователем дисциплина
-    
-    Returns:
-        Dict с уточнениями или None
+    Проверяет, нужны ли уточнения перед анализом. Результаты кэшируются (48ч).
     """
+    # Cache lookup
+    raw_key = f"{match_text.strip().lower()}|{date_text.strip().lower()}|{user_discipline.strip().lower()}"
+    cache_key = hashlib.md5(raw_key.encode()).hexdigest()
+    with _match_cache_lock:
+        entry = _match_clarif_cache.get(cache_key)
+        if entry is not None:
+            if datetime.now(tz=timezone.utc) - entry["ts"] <= _MATCH_CACHE_TTL:
+                return entry["result"]
+            del _match_clarif_cache[cache_key]
+
+    result = await _check_match_clarification_impl(match_text, date_text, user_discipline)
+
+    with _match_cache_lock:
+        _match_clarif_cache[cache_key] = {"result": result, "ts": datetime.now(tz=timezone.utc)}
+    return result
+
+
+def cleanup_match_cache() -> int:
+    """Remove expired match clarification cache entries. Returns count removed."""
+    with _match_cache_lock:
+        now = datetime.now(tz=timezone.utc)
+        expired = [k for k, v in _match_clarif_cache.items() if now - v["ts"] > _MATCH_CACHE_TTL]
+        for k in expired:
+            del _match_clarif_cache[k]
+        return len(expired)
+
+
+async def _check_match_clarification_impl(
+    match_text: str,
+    date_text: str,
+    user_discipline: str,
+) -> Optional[Dict]:
+    """Internal implementation of check_match_clarification (uncached)."""
     
     team1, team2 = parse_match_teams(match_text)
     target_date = parse_date(date_text)
@@ -185,7 +216,7 @@ async def check_match_clarification(
         team2=team2,
         target_date=target_date,
         discipline=user_discipline,
-        days_range=3
+        days_range=7
     )
     
     if not matches:
