@@ -10,9 +10,10 @@
 - aiogram (асинхронный Telegram Bot API)
 - httpx (асинхронные HTTP-запросы)
 - LLM-провайдеры: Groq/AsyncGroq (primary), SambaNova/AsyncOpenAI, Google Gemini (async genai), DeepSeek/AsyncOpenAI — с автоматическим fallback
-- PostgreSQL (основная БД, по умолчанию) через asyncpg (асинхронный пул), SQLite (для dev/тестов) через asyncio.to_thread
+- PostgreSQL через asyncpg (асинхронный пул)
 - Markdown (документация и промпты)
 - Внешние спортивные API и поисковые движки (DDG, Serper, Tavily, Exa) — все async
+- `hltv` / `sportsipy` зарезервированы как первый контур сбора данных об участниках; интеграция в рабочий пайплайн пока не реализована
 
 ## Структура файлов и назначение модулей
 
@@ -23,7 +24,6 @@
 - `preflight_check.py` — offline-проверка окружения перед запуском: `.env`, API-ключи, критичные импорты, bootstrap LLM-клиентов. Итог: `PASS / WARN / FAIL`. Вызывается автоматически при старте бота и доступен как отдельная команда.
 - `requirements.txt` — зависимости Python.
 - `runtime.txt` — версия Python для деплоя.
-- `bot_data.sqlite3` — локальная БД пользователей и истории запросов.
 
 ### Каталог services/
 
@@ -39,13 +39,13 @@
 
 - `config.py` — все константы, API-ключи, конфигурации дисциплин (`DISCIPLINE_SOURCE_CONFIG`, `RUSSIAN_*` hints, `_REQUIRED_DATA_PATTERNS`).
 - `helpers.py` — утилиты: нормализация, валидация, определение региона, построение запросов.
-- `providers.py` — провайдерские функции (DDG, Serper, Exa, Tavily), скачивание страниц, анализ.
+- `providers.py` — провайдерские функции (DDG, Serper, Exa, Tavily), асинхронное скачивание страниц (`_fetch_page_excerpt_async`), анализ. Serper и Exa — exponential backoff при 429 (до 3 попыток, задержка `2^attempt` сек).
 - `discipline_config.py` — конфигурация 12 дисциплин: типы участников, шаблоны поисковых запросов (RU/EN), обязательные/желательные данные.
 - `betting_calculator.py` — расчёт вероятностей, извлечение данных из ответа LLM, формирование рекомендаций по ставкам.
 - `response_formatter.py` — форматирование финального ответа для Telegram, разбивка длинных сообщений.
 - `external_source.py` — async-работа с внешними источниками данных (TheSportsDB и др.), использует `httpx.AsyncClient`.
 - `logging_utils.py` — конфигурация логирования: подавление шумных внешних логгеров (httpx, groq, openai, google_genai), настройка уровней через env.
-- `user_store.py` — работа с БД пользователей (SQLite / PostgreSQL): учёт запросов, статистика, администрирование, промо-коды, подписки. **Полностью async** — PostgreSQL через `asyncpg.create_pool()`, SQLite через `asyncio.to_thread()`. Бэкенд выбирается через env `DB_BACKEND` (`postgres` по умолчанию, `sqlite` для dev/тестов). Поле `platform` (дефолт `'tg'`) — заготовка для мультиплатформенности (VK, MAX).
+- `user_store.py` — работа с БД пользователей (PostgreSQL): учёт запросов, статистика, администрирование, промо-коды, подписки. **Полностью async** через `asyncpg.create_pool()`. Поле `platform` (дефолт `'tg'`) — заготовка для мультиплатформенности (VK, MAX). `_q()` конвертирует `?` в `$1, $2, ...` для asyncpg, корректно обрабатывает `?` внутри SQL-строковых литералов.
 - `payment_service.py` — заготовка верификации платежей (RUB, USDT по 7 сетям, Telegram Stars). Функции — заглушки до интеграции с платёжными провайдерами и TG Wallet API.
 - `prompts.py` — загрузка и подготовка промптов для LLM из каталога `prompts/`.
 - `e2e_summary.py` — сбор и вывод итоговой E2E-статистики.
@@ -54,11 +54,11 @@
 
 ### Каталог prompts/
 
-Markdown-файлы с промптами для разных дисциплин (`football.md`, `hockey.md`, `cs2.md`, `tennis.md`, `basketball.md`, `volleyball.md`, `mma.md`, `boxing.md`, `dota2.md`, `lol.md`, `valorant.md`, `table_tennis.md`) и общий контракт ответа (`common_suffix.md`).
+Markdown-файлы с промптами для разных дисциплин (`football.md`, `hockey.md`, `cs2.md`, `cybersport.md`, `tennis.md`, `basketball.md`, `volleyball.md`, `mma.md`, `boxing.md`, `dota2.md`, `lol.md`, `valorant.md`, `table_tennis.md`) и общий контракт ответа (`common_suffix.md`).
 
 ### Каталог tests/
 
-Юнит-тесты (245 тестов):
+Тесты (251 тест):
 
 - `test_event_phase.py` — фазовая модель событий, TTL, блокировка, форматы дат, длительности дисциплин.
 - `test_analysis_cache.py` — кэш LLM-анализов, фазовый TTL, cleanup.
@@ -73,7 +73,7 @@ Markdown-файлы с промптами для разных дисциплин
 - `test_prompts.py` — загрузка промптов, наличие файлов.
 - `test_name_normalizer.py` — нормализация имён, транслитерация.
 - `test_match_finder.py` — парсинг команд, дат (с учетом таймзоны МСК), дисциплин, кэш валидации.
-- `test_user_store.py` — CRUD пользователей, событий, миграции схемы (SQLite/PostgreSQL), суточные лимиты, промо-коды, подписки, доступ, поле platform.
+- `test_user_store.py` — CRUD пользователей, событий, миграции схемы, суточные лимиты, промо-коды, подписки, доступ, поле platform. Требует PostgreSQL (pytest-postgresql); без PG эти тесты пропускаются, с настроенным PG входят в общий зелёный прогон.
 - `test_payment_service.py` — заглушки платёжного сервиса (RUB, USDT, Telegram Stars, неподдерживаемые сети).
 - `test_external_source.py` — TheSportsDB API (mock httpx), кэш team_id.
 - `test_logging_utils.py` — конфигурация логирования.
@@ -82,7 +82,9 @@ Markdown-файлы с промптами для разных дисциплин
 - `test_discipline_config.py` — конфигурация дисциплин, шаблоны запросов.
 - `test_collect_discipline_data.py` — пайплайн сбора данных (Serper→check_required→Tavily/Exa→DDG).
 
-Запуск: `python -m pytest tests/` или `python -m unittest discover -s tests -p "test_*.py"`
+Запуск: `python -m pytest tests/`
+
+> **Примечание:** `test_user_store.py` требует PostgreSQL (`pg_ctl` в PATH). На настроенной среде полный прогон сейчас проходит как `251 passed`, без skip.
 
 ## Процесс обработки запроса
 
@@ -90,7 +92,7 @@ Markdown-файлы с промптами для разных дисциплин
 2. `bot.py` (FSM) последовательно собирает: дисциплину, поддисциплину (если есть), команды/игроков, дату.
 3. Введённые данные валидируются: нормализация имён (`name_normalizer`), проверка матча (`search_engine.validate_match_request`), поиск события (`external_source`).
 4. `data_router.py` определяет нужный сервис по дисциплине и вызывает его.
-5. Сервис дисциплины инициирует сбор данных через `data_fetcher.fetch_match_analysis_data()` → `search_engine.collect_discipline_data()`. Пайплайн: Serper(query#1 min) → Serper(query#2 max) → `check_required_data()` → если missing: Tavily/Exa целевыми запросами → DDG fallback если Serper недоступен. Данные валидации переиспользуются через `pre_validated_sources`. Язык запросов определяется автоматически (RU для российского контекста). Страницы скачиваются для извлечения выжимок (`_fetch_page_excerpt_async`). После сбора — min-data gate: предупреждение в отчёте если обязательные данные не найдены.
+5. Сервис дисциплины инициирует сбор данных через `data_fetcher.fetch_match_analysis_data()` → `search_engine.collect_discipline_data()`. Текущий рабочий пайплайн: Serper(query#1 min) → Serper(query#2 max) → `check_required_data()` → если missing: Tavily/Exa целевыми запросами → DDG fallback если Serper недоступен. Целевой пайплайн для следующего контура: `hltv`/`sportsipy` как первичный сбор участников → DDG для валидации и дополнения → Serper для замен, формы, карточек, новостей и характеристик → Tavily/Exa, если минимальный набор после первых этапов не собран. Данные валидации переиспользуются через `pre_validated_sources`. Язык запросов определяется автоматически (RU для российского контекста). Страницы скачиваются для извлечения выжимок (`_fetch_page_excerpt_async`). После сбора — min-data gate: предупреждение в отчёте если обязательные данные не найдены.
 6. Собранные данные нормализуются и агрегируются в payload.
 7. Payload + системный промпт передаются в LLM через **round-robin ротацию** с fallback: при каждом вызове стартовый провайдер смещается циклически (`groq → sambanova → google → deepseek → groq → ...`), обеспечивая равномерную нагрузку. При ошибке — следующий по кругу.
 8. LLM возвращает структурированный прогноз (JSON + текстовый анализ).
@@ -122,6 +124,8 @@ Markdown-файлы с промптами для разных дисциплин
 3. **Team ID** (`external_source.py`) — кэш ID команд TheSportsDB, TTL 48ч. None не кэшируется.
 4. **Валидация матча** (`match_finder.py`) — кэш `check_match_clarification()`, TTL 48ч. None кэшируется. Окно поиска: ±7 дней.
 
+Все 4 кэша используют `asyncio.Lock` для потокобезопасности в async-контексте.
+
 **Периодическая очистка:** `_periodic_cache_cleanup()` запускается при старте бота, каждый час удаляет записи старше 48ч из всех 4 кэшей.
 
 **Блокировка завершённых событий:** при FINISHED — отдаётся кэш ≤48ч + предупреждение, или «данные устарели, уточните запрос». При EXPIRED — полный блок.
@@ -145,9 +149,7 @@ Markdown-файлы с промптами для разных дисциплин
 | `SAMBANOVA_API_KEY` | Одна из LLM* | Ключ SambaNova API |
 | `GOOGLE_API_KEY` | Одна из LLM* | Ключ Google Gemini API |
 | `DEEPSEEK_API_KEY` | Одна из LLM* | Ключ DeepSeek API |
-| `DB_BACKEND` | Нет | `sqlite` (по умолчанию) или `postgres` |
-| `DATABASE_URL` | При postgres | Строка подключения PostgreSQL |
-| `BOT_DB_PATH` | Нет | Путь к SQLite-файлу (по умолчанию `bot_data.sqlite3`) |
+| `DATABASE_URL` | Да | Строка подключения PostgreSQL |
 | `APP_LOG_LEVEL` | Нет | Уровень логирования приложения (`DEBUG`, `INFO`, `WARNING`) |
 | `EXTERNAL_LOG_LEVEL` | Нет | Уровень логирования внешних библиотек (по умолчанию `ERROR`) |
 | `QUIET_E2E_SUMMARY` | Нет | `true` — выводить E2E-телеметрию в stdout |

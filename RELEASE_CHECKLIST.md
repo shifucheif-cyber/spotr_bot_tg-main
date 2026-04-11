@@ -17,7 +17,6 @@
   - `SERPER_API_KEY`
   - `EXA_API_KEY`
   - `TAVILY_API_KEY`
-- Для локальной разработки без PostgreSQL: добавить `DB_BACKEND=sqlite`
 - Не менять порядок fallback-провайдеров: `Groq -> SambaNova -> Google -> DeepSeek`.
 
 ## 2. Preflight-проверка окружения
@@ -39,14 +38,17 @@ python preflight_check.py
 Выполнить:
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"
+python -m pytest tests/
 ```
 
 Ожидаемо:
 
 - все тесты зелёные
+- на машине с PostgreSQL тестовый прогон должен идти без skip
 - ошибок импорта нет
 - formatter/output pipeline не теряет `exact_score`, `total_prediction`, `analysis_summary`
+
+> **Примечание:** `test_user_store.py` требует PostgreSQL (`pg_ctl` в PATH). Для релизной проверки PostgreSQL должен быть доступен, чтобы весь набор проходил без skip.
 
 ## 4. Smoke по сервисам
 
@@ -137,8 +139,7 @@ python bot.py
 
 ## 11. База данных и ограничения (paywall)
 
-- Убедитесь, что выставлен DB_BACKEND (sqlite или postgres).
-- Если postgres, установите переменную DATABASE_URL и зависимость psycopg2-binary.
+- Убедитесь, что установлена переменная `DATABASE_URL` (PostgreSQL обязателен).
 - При вызове init_user_store() автоматически создаются столбцы daily_requests и last_request_date.
 - Для включения дневного лимита и платных подписок, установите ENABLE_PAYWALL = True в bot.py перед запуском.
 - Реализуйте команду /premium для оплаты и связи с админом для пользователей.

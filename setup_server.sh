@@ -8,17 +8,31 @@ set -euo pipefail
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-echo -e "${GREEN}[1/6] Установка системных зависимостей...${NC}"
-apt update && apt install -y python3-pip python3-venv postgresql postgresql-contrib libpq-dev
+echo -e "${GREEN}[1/7] Установка системных зависимостей...${NC}"
+apt update && apt install -y software-properties-common postgresql postgresql-contrib libpq-dev
 
-echo -e "${GREEN}[2/6] Запуск PostgreSQL...${NC}"
+echo -e "${GREEN}[2/7] Установка Python 3.13 (deadsnakes PPA)...${NC}"
+if ! command -v python3.13 &>/dev/null; then
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt update
+    apt install -y python3.13 python3.13-venv python3.13-dev
+fi
+
+if ! command -v python3.13 &>/dev/null; then
+    echo "⚠ Python 3.13 недоступен, используется системный python3"
+    PY=python3
+else
+    PY=python3.13
+fi
+
+echo -e "${GREEN}[3/7] Запуск PostgreSQL...${NC}"
 systemctl enable postgresql
 systemctl start postgresql
 
 DB_USER="spotr_bot"
 DB_NAME="spotr_bot_db"
 
-echo -e "${GREEN}[3/6] Создание пользователя и БД PostgreSQL...${NC}"
+echo -e "${GREEN}[4/7] Создание пользователя и БД PostgreSQL...${NC}"
 read -sp "Введите пароль для пользователя PostgreSQL '${DB_USER}': " DB_PASS
 echo
 
@@ -30,15 +44,15 @@ sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | 
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
     || sudo -u postgres createdb -O "${DB_USER}" "${DB_NAME}"
 
-echo -e "${GREEN}[4/6] Настройка виртуального окружения Python...${NC}"
+echo -e "${GREEN}[5/7] Настройка виртуального окружения Python...${NC}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-python3 -m venv venv
+${PY} -m venv venv
 ./venv/bin/python -m pip install -U pip
 ./venv/bin/python -m pip install -r requirements.txt
 
-echo -e "${GREEN}[5/6] Настройка .env...${NC}"
+echo -e "${GREEN}[6/7] Настройка .env...${NC}"
 if [ ! -f .env ]; then
     cp .env.example .env
     echo "Создан .env из .env.example"
@@ -57,10 +71,9 @@ set_env_var() {
     fi
 }
 
-set_env_var "DB_BACKEND" "postgres"
 set_env_var "DATABASE_URL" "${DATABASE_URL}"
 
-echo -e "${GREEN}[6/6] Preflight-проверка...${NC}"
+echo -e "${GREEN}[7/7] Preflight-проверка...${NC}"
 ./venv/bin/python preflight_check.py
 
 echo ""

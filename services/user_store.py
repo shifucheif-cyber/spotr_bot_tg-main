@@ -2,18 +2,12 @@ import asyncio
 import json
 import logging
 import os
-import sqlite3
-from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_BACKEND = os.getenv("DB_BACKEND", "postgres").lower()
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-DB_PATH = Path(os.getenv("BOT_DB_PATH", BASE_DIR / "bot_data.sqlite3"))
 
 # --- asyncpg connection pool (lazy) ---
 _pg_pool = None
@@ -28,15 +22,7 @@ async def _get_pool():
 
 
 async def close_pool():
-    """Close PostgreSQL connection pool if open."""
-    global _pg_pool
-    if _pg_pool is not None:
-        await _pg_pool.close()
-        _pg_pool = None
-
-
-async def close_pool():
-    """Close PostgreSQL connection pool if open."""
+    """Close PostgreSQL connection pool."""
     global _pg_pool
     if _pg_pool is not None:
         await _pg_pool.close()
@@ -44,12 +30,16 @@ async def close_pool():
 
 
 def _q(sql: str) -> str:
-    """Convert '?' placeholders to '$1, $2, ...' for asyncpg."""
-    if DB_BACKEND != "postgres":
-        return sql
+    """Convert '?' placeholders to '$1, $2, ...' for asyncpg.
+
+    Skips '?' inside SQL string literals (single quotes).
+    """
     out, n = [], 0
+    in_string = False
     for ch in sql:
-        if ch == '?':
+        if ch == "'":
+            in_string = not in_string
+        if ch == '?' and not in_string:
             n += 1
             out.append(f'${n}')
         else:
@@ -57,88 +47,36 @@ def _q(sql: str) -> str:
     return ''.join(out)
 
 
-# --- SQLite connection (dev / tests) ---
-
-def get_connection():
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
 # --- Async DB helpers ---
 
 async def _fetchone(sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
-    if DB_BACKEND == "postgres":
-        pool = await _get_pool()
-        row = await pool.fetchrow(_q(sql), *params)
-        return dict(row) if row else None
-
-    def _s():
-        with closing(get_connection()) as conn:
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            r = cur.fetchone()
-            return dict(r) if r else None
-    return await asyncio.to_thread(_s)
+    pool = await _get_pool()
+    row = await pool.fetchrow(_q(sql), *params)
+    return dict(row) if row else None
 
 
 async def _fetchall(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
-    if DB_BACKEND == "postgres":
-        pool = await _get_pool()
-        rows = await pool.fetch(_q(sql), *params)
-        return [dict(r) for r in rows]
-
-    def _s():
-        with closing(get_connection()) as conn:
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            return [dict(r) for r in cur.fetchall()]
-    return await asyncio.to_thread(_s)
+    pool = await _get_pool()
+    rows = await pool.fetch(_q(sql), *params)
+    return [dict(r) for r in rows]
 
 
 async def _fetchval(sql: str, params: tuple = ()):
     """Execute and return the first column of the first row."""
-    if DB_BACKEND == "postgres":
-        pool = await _get_pool()
-        return await pool.fetchval(_q(sql), *params)
-
-    def _s():
-        with closing(get_connection()) as conn:
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            r = cur.fetchone()
-            return r[0] if r else None
-    return await asyncio.to_thread(_s)
+    pool = await _get_pool()
+    return await pool.fetchval(_q(sql), *params)
 
 
 async def _execute(sql: str, params: tuple = ()) -> None:
-    if DB_BACKEND == "postgres":
-        pool = await _get_pool()
-        await pool.execute(_q(sql), *params)
-        return
-
-    def _s():
-        with closing(get_connection()) as conn:
-            conn.cursor().execute(sql, params)
-            conn.commit()
-    await asyncio.to_thread(_s)
+    pool = await _get_pool()
+    await pool.execute(_q(sql), *params)
 
 
 async def _execute_count(sql: str, params: tuple = ()) -> int:
     """Execute and return number of affected rows."""
-    if DB_BACKEND == "postgres":
-        pool = await _get_pool()
-        status = await pool.execute(_q(sql), *params)
-        return int(status.split()[-1])
-
-    def _s():
-        with closing(get_connection()) as conn:
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            count = cur.rowcount
-            conn.commit()
-            return count
-    return await asyncio.to_thread(_s)
+    pool = await _get_pool()
+    status = await pool.execute(_q(sql), *params)
+    return int(status.split()[-1])
 
 
 # --- Utilities ---
@@ -153,9 +91,6 @@ from services.match_finder import get_msk_now
 # --- Public API (all async) ---
 
 async def init_user_store() -> None:
-    if DB_BACKEND == "sqlite":
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     users_ddl = """
         CREATE TABLE IF NOT EXISTS users (
             telegram_user_id BIGINT PRIMARY KEY,
@@ -176,29 +111,16 @@ async def init_user_store() -> None:
             last_request_date TEXT
         )
     """
-    if DB_BACKEND == "postgres":
-        events_ddl = """
-            CREATE TABLE IF NOT EXISTS user_events (
-                id SERIAL PRIMARY KEY,
-                telegram_user_id BIGINT NOT NULL,
-                event_type TEXT NOT NULL,
-                event_time TEXT NOT NULL,
-                details_json TEXT,
-                FOREIGN KEY (telegram_user_id) REFERENCES users(telegram_user_id)
-            )
-        """
-    else:
-        events_ddl = """
-            CREATE TABLE IF NOT EXISTS user_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_user_id INTEGER NOT NULL,
-                event_type TEXT NOT NULL,
-                event_time TEXT NOT NULL,
-                details_json TEXT,
-                FOREIGN KEY (telegram_user_id) REFERENCES users(telegram_user_id)
-            )
-        """
-
+    events_ddl = """
+        CREATE TABLE IF NOT EXISTS user_events (
+            id SERIAL PRIMARY KEY,
+            telegram_user_id BIGINT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_time TEXT NOT NULL,
+            details_json TEXT,
+            FOREIGN KEY (telegram_user_id) REFERENCES users(telegram_user_id)
+        )
+    """
     promo_ddl = """
         CREATE TABLE IF NOT EXISTS promo_codes (
             code TEXT PRIMARY KEY,
@@ -218,7 +140,6 @@ async def init_user_store() -> None:
         ("promo_requests_left", "INTEGER"),
     ]
 
-    # --- Schema versioning ---
     schema_version_ddl = """
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER NOT NULL
@@ -226,65 +147,34 @@ async def init_user_store() -> None:
     """
 
     MIGRATIONS = [
-        # Version 1: add daily_requests, last_request_date, promo columns
         [f"ALTER TABLE users ADD COLUMN {col} {defn}" for col, defn in columns],
-        # Version 2: add platform column for multi-messenger support
         ["ALTER TABLE users ADD COLUMN platform TEXT NOT NULL DEFAULT 'tg'"],
     ]
 
-    if DB_BACKEND == "postgres":
-        pool = await _get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(users_ddl)
-            await conn.execute(events_ddl)
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_user_events_user_time ON user_events(telegram_user_id, event_time)"
-            )
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_user_events_type_time ON user_events(event_type, event_time)"
-            )
-            await conn.execute(promo_ddl)
-            await conn.execute(schema_version_ddl)
-            row = await conn.fetchrow("SELECT MAX(version) AS v FROM schema_version")
-            current_version = (row["v"] or 0) if row else 0
-            for idx, stmts in enumerate(MIGRATIONS, start=1):
-                if idx <= current_version:
-                    continue
-                for stmt in stmts:
-                    try:
-                        await conn.execute(stmt)
-                    except Exception:
-                        pass
-                await conn.execute("INSERT INTO schema_version (version) VALUES ($1)", idx)
-            logger.info("DB schema at version %d", max(current_version, len(MIGRATIONS)))
-    else:
-        def _s():
-            with closing(get_connection()) as conn:
-                cur = conn.cursor()
-                cur.execute(users_ddl)
-                cur.execute(events_ddl)
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_user_events_user_time ON user_events(telegram_user_id, event_time)"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_user_events_type_time ON user_events(event_type, event_time)"
-                )
-                cur.execute(promo_ddl)
-                cur.execute(schema_version_ddl)
-                cur.execute("SELECT MAX(version) AS v FROM schema_version")
-                row = cur.fetchone()
-                current_version = (row["v"] or 0) if row else 0
-                for idx, stmts in enumerate(MIGRATIONS, start=1):
-                    if idx <= current_version:
-                        continue
-                    for stmt in stmts:
-                        try:
-                            cur.execute(stmt)
-                        except Exception:
-                            pass
-                    cur.execute("INSERT INTO schema_version (version) VALUES (?)", (idx,))
-                conn.commit()
-        await asyncio.to_thread(_s)
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(users_ddl)
+        await conn.execute(events_ddl)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_events_user_time ON user_events(telegram_user_id, event_time)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_events_type_time ON user_events(event_type, event_time)"
+        )
+        await conn.execute(promo_ddl)
+        await conn.execute(schema_version_ddl)
+        row = await conn.fetchrow("SELECT MAX(version) AS v FROM schema_version")
+        current_version = (row["v"] or 0) if row else 0
+        for idx, stmts in enumerate(MIGRATIONS, start=1):
+            if idx <= current_version:
+                continue
+            for stmt in stmts:
+                try:
+                    await conn.execute(stmt)
+                except Exception as e:
+                    logger.debug("Migration stmt skipped (likely duplicate): %s", e)
+            await conn.execute("INSERT INTO schema_version (version) VALUES ($1)", idx)
+        logger.info("DB schema at version %d", max(current_version, len(MIGRATIONS)))
 
 
 async def check_daily_limit(telegram_user_id: int, max_free: int = 3) -> bool:
@@ -312,42 +202,21 @@ async def increment_daily_request(telegram_user_id: int) -> None:
     Сбрасывает его, если наступил новый день по МСК.
     """
     today_date = get_msk_now().strftime('%Y-%m-%d')
-
-    if DB_BACKEND == "postgres":
-        pool = await _get_pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    _q("SELECT daily_requests, last_request_date FROM users WHERE telegram_user_id = ?"),
-                    telegram_user_id
-                )
-                if not row:
-                    return
-                row = dict(row)
-                new_requests = 1 if row.get("last_request_date") != today_date else (row.get("daily_requests") or 0) + 1
-                await conn.execute(
-                    _q("UPDATE users SET daily_requests = ?, last_request_date = ? WHERE telegram_user_id = ?"),
-                    new_requests, today_date, telegram_user_id
-                )
-    else:
-        def _s():
-            with closing(get_connection()) as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT daily_requests, last_request_date FROM users WHERE telegram_user_id = ?",
-                    (telegram_user_id,)
-                )
-                r = cur.fetchone()
-                if not r:
-                    return
-                row = dict(r)
-                new_requests = 1 if row.get("last_request_date") != today_date else (row.get("daily_requests") or 0) + 1
-                cur.execute(
-                    "UPDATE users SET daily_requests = ?, last_request_date = ? WHERE telegram_user_id = ?",
-                    (new_requests, today_date, telegram_user_id)
-                )
-                conn.commit()
-        await asyncio.to_thread(_s)
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                _q("SELECT daily_requests, last_request_date FROM users WHERE telegram_user_id = ?"),
+                telegram_user_id
+            )
+            if not row:
+                return
+            row = dict(row)
+            new_requests = 1 if row.get("last_request_date") != today_date else (row.get("daily_requests") or 0) + 1
+            await conn.execute(
+                _q("UPDATE users SET daily_requests = ?, last_request_date = ? WHERE telegram_user_id = ?"),
+                new_requests, today_date, telegram_user_id
+            )
 
 
 async def upsert_user(user: Any, admin_telegram_id: Optional[int] = None, platform: str = "tg") -> None:
@@ -554,63 +423,33 @@ async def check_user_access(telegram_user_id: int, max_free: int = 3) -> Dict[st
 
 async def activate_promo(telegram_user_id: int, promo_code: str) -> Dict[str, Any]:
     """Активирует промокод для пользователя. Возвращает {ok: bool, message: str}."""
-    if DB_BACKEND == "postgres":
-        pool = await _get_pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                promo_row = await conn.fetchrow(
-                    _q("SELECT * FROM promo_codes WHERE code = ?"), promo_code
-                )
-                if not promo_row:
-                    return {"ok": False, "message": "Промокод не найден."}
-                promo = dict(promo_row)
-                if not promo.get("active"):
-                    return {"ok": False, "message": "Промокод неактивен."}
-                if promo.get("uses_count", 0) >= promo.get("max_uses", 1):
-                    return {"ok": False, "message": "Промокод исчерпан."}
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            promo_row = await conn.fetchrow(
+                _q("SELECT * FROM promo_codes WHERE code = ?"), promo_code
+            )
+            if not promo_row:
+                return {"ok": False, "message": "Промокод не найден."}
+            promo = dict(promo_row)
+            if not promo.get("active"):
+                return {"ok": False, "message": "Промокод неактивен."}
+            if promo.get("uses_count", 0) >= promo.get("max_uses", 1):
+                return {"ok": False, "message": "Промокод исчерпан."}
 
-                days = promo.get("days_granted", 0)
-                requests = promo.get("requests_granted", 0)
-                promo_until = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat() if days > 0 else None
+            days = promo.get("days_granted", 0)
+            requests = promo.get("requests_granted", 0)
+            promo_until = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat() if days > 0 else None
 
-                await conn.execute(
-                    _q("UPDATE users SET promo_code = ?, promo_until = ?, promo_requests_left = ? WHERE telegram_user_id = ?"),
-                    promo_code, promo_until, requests if requests > 0 else None, telegram_user_id
-                )
-                await conn.execute(
-                    _q("UPDATE promo_codes SET uses_count = uses_count + 1 WHERE code = ?"),
-                    promo_code
-                )
-        return {"ok": True, "message": f"Промокод активирован! Дней: {days}, запросов: {requests}."}
-    else:
-        def _s():
-            with closing(get_connection()) as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM promo_codes WHERE code = ?", (promo_code,))
-                promo_row = cur.fetchone()
-                if not promo_row:
-                    return {"ok": False, "message": "Промокод не найден."}
-                promo = dict(promo_row)
-                if not promo.get("active"):
-                    return {"ok": False, "message": "Промокод неактивен."}
-                if promo.get("uses_count", 0) >= promo.get("max_uses", 1):
-                    return {"ok": False, "message": "Промокод исчерпан."}
-
-                days = promo.get("days_granted", 0)
-                requests = promo.get("requests_granted", 0)
-                promo_until = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat() if days > 0 else None
-
-                cur.execute(
-                    "UPDATE users SET promo_code = ?, promo_until = ?, promo_requests_left = ? WHERE telegram_user_id = ?",
-                    (promo_code, promo_until, requests if requests > 0 else None, telegram_user_id)
-                )
-                cur.execute(
-                    "UPDATE promo_codes SET uses_count = uses_count + 1 WHERE code = ?",
-                    (promo_code,)
-                )
-                conn.commit()
-                return {"ok": True, "message": f"Промокод активирован! Дней: {days}, запросов: {requests}."}
-        return await asyncio.to_thread(_s)
+            await conn.execute(
+                _q("UPDATE users SET promo_code = ?, promo_until = ?, promo_requests_left = ? WHERE telegram_user_id = ?"),
+                promo_code, promo_until, requests if requests > 0 else None, telegram_user_id
+            )
+            await conn.execute(
+                _q("UPDATE promo_codes SET uses_count = uses_count + 1 WHERE code = ?"),
+                promo_code
+            )
+    return {"ok": True, "message": f"Промокод активирован! Дней: {days}, запросов: {requests}."}
 
 
 async def activate_subscription(telegram_user_id: int, days: int) -> None:

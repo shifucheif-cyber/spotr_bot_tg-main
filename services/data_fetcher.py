@@ -7,7 +7,6 @@ import asyncio
 import hashlib
 import logging
 import re
-import threading
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 _match_cache: Dict[str, Dict[str, Any]] = {}
 _DEFAULT_SEARCH_TTL = timedelta(hours=24)
 _CACHE_MAX = 200
-_cache_lock = threading.Lock()
+_cache_lock = asyncio.Lock()
 
 
 def _cache_key(discipline: str, side1: str, side2: str, match_date: str = "") -> str:
@@ -34,9 +33,9 @@ def _cache_key(discipline: str, side1: str, side2: str, match_date: str = "") ->
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def _get_cached(key: str, phase: EventPhase | None = None) -> Optional[str]:
+async def _get_cached(key: str, phase: EventPhase | None = None) -> Optional[str]:
     ttl = get_phase_ttl(phase) if phase is not None else _DEFAULT_SEARCH_TTL
-    with _cache_lock:
+    async with _cache_lock:
         entry = _match_cache.get(key)
         if not entry:
             return None
@@ -47,8 +46,8 @@ def _get_cached(key: str, phase: EventPhase | None = None) -> Optional[str]:
         return entry["result"]
 
 
-def _put_cache(key: str, result: str) -> None:
-    with _cache_lock:
+async def _put_cache(key: str, result: str) -> None:
+    async with _cache_lock:
         if len(_match_cache) >= _CACHE_MAX:
             # удаляем самый старый
             oldest = min(_match_cache, key=lambda k: _match_cache[k]["ts"])
@@ -124,13 +123,13 @@ async def fetch_match_analysis_data(
 
     # Finished events — serve cache ≤48h or message
     if phase is EventPhase.FINISHED:
-        cached = _get_cached(cache_k, phase=phase)
+        cached = await _get_cached(cache_k, phase=phase)
         if cached is not None:
             logger.info("[FETCH] Event FINISHED, returning cached data (≤48h)")
             return cached
         return "⚠️ Событие завершено. Данные устарели, уточните запрос."
 
-    cached = _get_cached(cache_k, phase=phase)
+    cached = await _get_cached(cache_k, phase=phase)
     if cached is not None:
         logger.info(f"[FETCH] Найден кэш для ключа: {cache_k}")
         return cached
@@ -164,14 +163,14 @@ async def fetch_match_analysis_data(
         parts.append("\nДанные из поисковых источников не найдены. Анализируйте на основе общих знаний.")
 
     result = "\n".join(parts)
-    _put_cache(cache_k, result)
+    await _put_cache(cache_k, result)
     return result
 
 
-def cleanup_expired_cache() -> int:
+async def cleanup_expired_cache() -> int:
     """Удаляет записи старше 48ч (макс. возможный TTL). Возвращает количество удалённых."""
     max_ttl = timedelta(hours=48)
-    with _cache_lock:
+    async with _cache_lock:
         now = datetime.now(tz=timezone.utc)
         expired = [k for k, v in _match_cache.items() if now - v["ts"] > max_ttl]
         for k in expired:

@@ -9,7 +9,6 @@
 #   sudo -u postgres createdb -O spotr_bot spotr_bot_db
 #
 # В .env укажи:
-#   DB_BACKEND=postgres
 #   DATABASE_URL=postgresql://spotr_bot:<пароль>@localhost:5432/spotr_bot_db
 # =====================================================================
 
@@ -31,13 +30,19 @@ beautifulsoup4>=4.13
 lxml>=5.3
 ddgs>=7.0
 
-# --- Поиск (SDK не импортируются — API вызываются через httpx, но оставлены на будущее) ---
+# --- Search analytics (API вызываются через httpx; SDK зарезервированы) ---
 tavily-python>=0.5.0
 exa-py>=1.8
 
-# --- Спортивные данные (зарезервированы) ---
+# --- Спортивные данные (первый контур сбора — TODO: интеграция в пайплайн) ---
 hltv
 sportsipy
 
-# --- PostgreSQL (production) ---
+# --- PostgreSQL ---
 asyncpg>=0.30.0,<1.0
+
+# --- Testing ---
+pytest>=9.0,<10.0
+pytest-asyncio>=1.0,<2.0
+pytest-postgresql>=6.0,<9.0
+psycopg[binary]>=3.1,<4.0

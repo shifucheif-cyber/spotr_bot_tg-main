@@ -48,18 +48,10 @@ sudo -u postgres createdb -O spotr_bot spotr_bot_db
 
 4. Скопировать `.env` с секретами (в репозиторий не коммитится). Шаблон имён переменных — `.env.example`.
 
-   Для production (PostgreSQL):
+   PostgreSQL:
 
    ```ini
-   DB_BACKEND=postgres
    DATABASE_URL=postgresql://spotr_bot:<пароль>@localhost:5432/spotr_bot_db
-   ```
-
-   Для локальной разработки (SQLite):
-
-   ```ini
-   DB_BACKEND=sqlite
-   BOT_DB_PATH=bot_data.sqlite3
    ```
 
 5. Проверка окружения перед запуском:
@@ -90,7 +82,7 @@ sudo -u postgres createdb -O spotr_bot spotr_bot_db
 
 ## База данных
 
-По умолчанию используется PostgreSQL через **asyncpg** (асинхронный пул). Задайте `DATABASE_URL` в `.env`. Для локальной разработки/тестов можно использовать SQLite: `DB_BACKEND=sqlite` в `.env` (обращения к SQLite оборачиваются в `asyncio.to_thread`). Подробнее — в `.env.example`.
+Используется PostgreSQL через **asyncpg** (асинхронный пул). Задайте `DATABASE_URL` в `.env`. Подробнее — в `.env.example`.
 
 ## Зависимости
 
@@ -100,7 +92,9 @@ sudo -u postgres createdb -O spotr_bot spotr_bot_db
 ## Тесты
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"
+python -m pytest tests/
 ```
 
-245 тестов покрывают: фазовую модель событий (event_phase), LLM-клиенты (включая маскировку ключей), preflight, промпты, нормализацию имён, поиск матчей (включая кэш валидации и часовые пояса МСК), хранилище пользователей (миграция БД, суточные лимиты, промо-коды, подписки, доступ), платёжный сервис (заглушки), внешние источники (включая кэш team_id), логирование, E2E-телеметрию, все 8 спортивных сервисов, betting calculator, data router, response formatter, search engine, конфигурацию дисциплин, сбор данных (collect_discipline_data), кэширование (фазовый TTL, cleanup), флоу Telegram бота (включая paywall-гейт, санитизацию ввода, семафор).
+> **Примечание:** тесты `test_user_store.py` требуют PostgreSQL (`pg_ctl` в PATH). Без PG они пропускаются, а на настроенной среде полный прогон сейчас идёт как `251 passed`, без skip.
+
+251 тестов покрывают: фазовую модель событий (event_phase), LLM-клиенты (включая маскировку ключей), preflight, промпты, нормализацию имён, поиск матчей (включая кэш валидации и часовые пояса МСК), хранилище пользователей (миграция БД, суточные лимиты, промо-коды, подписки, доступ, `_q()` строковые литералы), платёжный сервис (заглушки), внешние источники (включая кэш team_id), логирование, E2E-телеметрию, все 8 спортивных сервисов, betting calculator, data router, response formatter, search engine (включая exponential backoff 429), конфигурацию дисциплин, сбор данных (collect_discipline_data), кэширование (фазовый TTL, cleanup, asyncio.Lock), флоу Telegram бота (включая paywall-гейт, санитизацию ввода, семафор).

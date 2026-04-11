@@ -3,10 +3,10 @@ Match finder module: поиск матчей по командам и датам
 Проверяет дисциплину и дату перед началом анализа.
 """
 
+import asyncio
 import re
 import hashlib
 import logging
-import threading
 import pytz
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Tuple
@@ -21,7 +21,7 @@ MSK_TZ = pytz.timezone('Europe/Moscow')
 # ── Match clarification cache ──
 _match_clarif_cache: dict[str, dict] = {}
 _MATCH_CACHE_TTL = timedelta(hours=48)
-_match_cache_lock = threading.Lock()
+_match_cache_lock = asyncio.Lock()
 
 def get_msk_now() -> datetime:
     """Возвращает текущее время по Москве."""
@@ -176,7 +176,7 @@ async def check_match_clarification(
     # Cache lookup
     raw_key = f"{match_text.strip().lower()}|{date_text.strip().lower()}|{user_discipline.strip().lower()}"
     cache_key = hashlib.md5(raw_key.encode()).hexdigest()
-    with _match_cache_lock:
+    async with _match_cache_lock:
         entry = _match_clarif_cache.get(cache_key)
         if entry is not None:
             if datetime.now(tz=timezone.utc) - entry["ts"] <= _MATCH_CACHE_TTL:
@@ -185,14 +185,14 @@ async def check_match_clarification(
 
     result = await _check_match_clarification_impl(match_text, date_text, user_discipline)
 
-    with _match_cache_lock:
+    async with _match_cache_lock:
         _match_clarif_cache[cache_key] = {"result": result, "ts": datetime.now(tz=timezone.utc)}
     return result
 
 
-def cleanup_match_cache() -> int:
+async def cleanup_match_cache() -> int:
     """Remove expired match clarification cache entries. Returns count removed."""
-    with _match_cache_lock:
+    async with _match_cache_lock:
         now = datetime.now(tz=timezone.utc)
         expired = [k for k, v in _match_clarif_cache.items() if now - v["ts"] > _MATCH_CACHE_TTL]
         for k in expired:

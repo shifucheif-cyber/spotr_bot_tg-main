@@ -99,7 +99,7 @@ def extract_betting_data(llm_response: str) -> dict:
                 prob_val = data.get("probability")
                 if prob_val is not None:
                     try: prob_t1 = float(prob_val)
-                    except: prob_t1 = None
+                    except (ValueError, TypeError): prob_t1 = None
             result["probability"] = prob_t1
             result["win_probability_team1"] = prob_t1
             result["win_probability_team2"] = prob_t2

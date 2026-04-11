@@ -60,9 +60,7 @@ from services.search_providers.helpers import (
 from services.search_providers.providers import (
     DDGS,
     _analysis_providers,
-    _fetch_page_excerpt,
     _fetch_page_excerpt_async,
-    _get_sync_executor,
     _merge_analysis_results,
     _search_with_exa,
     _search_with_tavily,
@@ -234,7 +232,7 @@ async def collect_validated_sources(
     discipline_label = _DISCIPLINE_SEARCH_LABEL.get(discipline, discipline)
     context_suffix = f" {context_terms}" if context_terms else ""
 
-    def _validate_and_collect(results: List[Dict[str, Any]]) -> None:
+    async def _validate_and_collect(results: List[Dict[str, Any]]) -> None:
         for result in results:
             if len(validated_sources) >= min_sources:
                 return
@@ -250,7 +248,7 @@ async def collect_validated_sources(
             haystack = f"{title} {body}".lower()
             token_hits = sum(1 for t in entity_tokens if t in haystack)
             if is_trusted or token_hits >= 1:
-                excerpt = _fetch_page_excerpt(url, entity) if url else ""
+                excerpt = (await _fetch_page_excerpt_async(url, entity)) if url else ""
                 validated_sources.append({
                     "site": source,
                     "source": source,
@@ -281,7 +279,7 @@ async def collect_validated_sources(
             "status": "validated",
         }
 
-    def _fallback_payload() -> Dict[str, Any]:
+    async def _fallback_payload() -> Dict[str, Any]:
         if not validated_sources and unvalidated_results:
             logger.info("[VALIDATE] Fallback: scoring %d unvalidated results for '%s'", len(unvalidated_results), entity)
             entity_tokens = _normalize_tokens(entity)
@@ -300,7 +298,7 @@ async def collect_validated_sources(
                 url = result.get("href", "")
                 title = result.get("title", "")
                 body = result.get("body", "")
-                excerpt = _fetch_page_excerpt(url, entity) if url else ""
+                excerpt = (await _fetch_page_excerpt_async(url, entity)) if url else ""
                 source = _extract_source(url)
                 is_trusted = any(domain in url for domain in trusted_domains)
                 validated_sources.append({
@@ -338,7 +336,7 @@ async def collect_validated_sources(
             ddg_results = await search_with_ddgs(
                 ddg_query, num_results=max(6, min_sources + 4), timelimit=timelimit
             )
-            _validate_and_collect(ddg_results)
+            await _validate_and_collect(ddg_results)
             logger.info("[VALIDATE] After DDG: %d validated for '%s'", len(validated_sources), entity)
 
         if len(validated_sources) >= min_sources:
@@ -348,14 +346,14 @@ async def collect_validated_sources(
         serper_primary = f"{entity} {discipline_label} {stat_type}{context_suffix}"
         logger.info("[VALIDATE] Serper primary: %s", serper_primary)
         serper_results = await search_with_serper(serper_primary, num_results=3)
-        _validate_and_collect(serper_results)
+        await _validate_and_collect(serper_results)
         logger.info("[VALIDATE] After Serper primary: %d validated for '%s'", len(validated_sources), entity)
 
         if len(validated_sources) < min_sources and SEARCH_SERP_SUPPLEMENT_TERMS and SERPER_API_KEY:
             supplement_q = f"{entity} {discipline_label} {SEARCH_SERP_SUPPLEMENT_TERMS}{context_suffix}"
             logger.info("[VALIDATE] Serper supplement (news/form/injuries): %s", supplement_q)
             supplement_results = await search_with_serper(supplement_q, num_results=3)
-            _validate_and_collect(supplement_results)
+            await _validate_and_collect(supplement_results)
 
         if len(validated_sources) < min_sources and not fallback_attempted and region in ("ru", "intl"):
             logger.info("[VALIDATE] Serper regional fallback: alt region for trusted site order")
@@ -364,11 +362,11 @@ async def collect_validated_sources(
             all_sites = get_ordered_entries(alt_region)
             trusted_domains = {entry["site"] for entry in all_sites}
             serper_results = await search_with_serper(serper_primary, num_results=3)
-            _validate_and_collect(serper_results)
+            await _validate_and_collect(serper_results)
             if len(validated_sources) < min_sources and SEARCH_SERP_SUPPLEMENT_TERMS and SERPER_API_KEY:
                 supplement_q = f"{entity} {discipline_label} {SEARCH_SERP_SUPPLEMENT_TERMS}{context_suffix}"
                 supplement_results = await search_with_serper(supplement_q, num_results=3)
-                _validate_and_collect(supplement_results)
+                await _validate_and_collect(supplement_results)
             logger.info("[VALIDATE] After regional Serper: %d validated for '%s'", len(validated_sources), entity)
 
         if len(validated_sources) >= min_sources:
@@ -400,7 +398,7 @@ async def collect_validated_sources(
                 })
             logger.info(f"[VALIDATE] После Exa/Tavily: {len(validated_sources)} валидировано для '{entity}'")
 
-        return _fallback_payload()
+        return await _fallback_payload()
 
     return await _main_async()
 

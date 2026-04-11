@@ -34,10 +34,32 @@ class TestPrompts(unittest.TestCase):
 
     def test_all_known_disciplines_load(self):
         from services.prompts import get_discipline_prompt
-        disciplines = ["футбол", "хоккей", "баскетбол", "теннис", "волейбол", "киберспорт"]
+        disciplines = [
+            "футбол", "хоккей", "баскетбол", "теннис", "волейбол",
+            "киберспорт", "мма", "бокс", "настольный теннис",
+        ]
         for d in disciplines:
             prompt = get_discipline_prompt(d)
             self.assertTrue(len(prompt) > 50, f"Empty prompt for {d}")
+
+    def test_all_esports_subdisciplines_load(self):
+        from services.prompts import get_discipline_prompt
+        esports = {"cs2": "cs2", "dota2": "dota2", "lol": "lol", "valorant": "valorant"}
+        for label, key in esports.items():
+            prompt = get_discipline_prompt(label, discipline_key=key)
+            self.assertTrue(len(prompt) > 50, f"Empty prompt for {label}")
+
+    def test_all_prompt_files_exist(self):
+        from pathlib import Path
+        prompts_dir = Path(__file__).parent.parent / "prompts"
+        expected_files = [
+            "football.md", "hockey.md", "basketball.md", "volleyball.md",
+            "tennis.md", "table_tennis.md", "mma.md", "boxing.md",
+            "cs2.md", "cybersport.md", "dota2.md", "lol.md", "valorant.md",
+            "common_suffix.md",
+        ]
+        for f in expected_files:
+            self.assertTrue((prompts_dir / f).exists(), f"Missing prompt file: {f}")
 
 
 if __name__ == "__main__":

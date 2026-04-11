@@ -1,9 +1,14 @@
 """Tests for services.analysis_cache — in-memory TTL cache for LLM results."""
+import asyncio
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from services import analysis_cache
 from services.event_phase import EventPhase
+
+
+def run_async(coro):
+    return asyncio.run(coro)
 
 
 class AnalysisCacheTests(unittest.TestCase):
@@ -29,19 +34,19 @@ class AnalysisCacheTests(unittest.TestCase):
         self.assertNotEqual(k1, k2)
 
     def test_get_returns_none_for_missing(self):
-        self.assertIsNone(analysis_cache.get_cached_analysis("missing"))
+        self.assertIsNone(run_async(analysis_cache.get_cached_analysis("missing")))
 
     def test_put_and_get_round_trip(self):
         result = {"provider": "groq", "text": "analysis text"}
-        analysis_cache.put_cached_analysis("key1", result)
-        self.assertEqual(analysis_cache.get_cached_analysis("key1"), result)
+        run_async(analysis_cache.put_cached_analysis("key1", result))
+        self.assertEqual(run_async(analysis_cache.get_cached_analysis("key1")), result)
 
     def test_expired_entry_returns_none(self):
         analysis_cache._analysis_cache["old"] = {
             "result": {"provider": "groq", "text": "old"},
             "ts": datetime.now(tz=timezone.utc) - analysis_cache._DEFAULT_LLM_TTL - timedelta(seconds=1),
         }
-        self.assertIsNone(analysis_cache.get_cached_analysis("old"))
+        self.assertIsNone(run_async(analysis_cache.get_cached_analysis("old")))
         self.assertNotIn("old", analysis_cache._analysis_cache)
 
     def test_evicts_oldest_when_full(self):
@@ -54,7 +59,7 @@ class AnalysisCacheTests(unittest.TestCase):
                 "result": {"provider": "x", "text": f"v{i}"},
                 "ts": datetime.now(tz=timezone.utc) + timedelta(seconds=i),
             }
-        analysis_cache.put_cached_analysis("fresh", {"provider": "y", "text": "fresh"})
+        run_async(analysis_cache.put_cached_analysis("fresh", {"provider": "y", "text": "fresh"}))
         self.assertEqual(len(analysis_cache._analysis_cache), analysis_cache._CACHE_MAX)
         self.assertNotIn("oldest", analysis_cache._analysis_cache)
         self.assertIn("fresh", analysis_cache._analysis_cache)
@@ -74,7 +79,7 @@ class AnalysisCacheTests(unittest.TestCase):
             "result": result,
             "ts": datetime.now(tz=timezone.utc) - timedelta(days=6),
         }
-        self.assertEqual(analysis_cache.get_cached_analysis("phase_key", phase=EventPhase.EARLY), result)
+        self.assertEqual(run_async(analysis_cache.get_cached_analysis("phase_key", phase=EventPhase.EARLY)), result)
 
     def test_phase_live_always_fresh(self):
         """LIVE phase: TTL=0, any cached entry is expired."""
@@ -82,7 +87,7 @@ class AnalysisCacheTests(unittest.TestCase):
             "result": {"provider": "groq", "text": "live"},
             "ts": datetime.now(tz=timezone.utc) - timedelta(seconds=1),
         }
-        self.assertIsNone(analysis_cache.get_cached_analysis("live_key", phase=EventPhase.LIVE))
+        self.assertIsNone(run_async(analysis_cache.get_cached_analysis("live_key", phase=EventPhase.LIVE)))
 
     def test_phase_finished_uses_48h_ttl(self):
         """FINISHED phase: entry at 47h ago should be valid (TTL=48h)."""
@@ -91,7 +96,7 @@ class AnalysisCacheTests(unittest.TestCase):
             "result": result,
             "ts": datetime.now(tz=timezone.utc) - timedelta(hours=47),
         }
-        self.assertEqual(analysis_cache.get_cached_analysis("fin_key", phase=EventPhase.FINISHED), result)
+        self.assertEqual(run_async(analysis_cache.get_cached_analysis("fin_key", phase=EventPhase.FINISHED)), result)
 
     def test_phase_finished_expired_49h(self):
         """FINISHED phase: entry at 49h ago should be expired (TTL=48h)."""
@@ -99,7 +104,7 @@ class AnalysisCacheTests(unittest.TestCase):
             "result": {"provider": "groq", "text": "old"},
             "ts": datetime.now(tz=timezone.utc) - timedelta(hours=49),
         }
-        self.assertIsNone(analysis_cache.get_cached_analysis("fin_old", phase=EventPhase.FINISHED))
+        self.assertIsNone(run_async(analysis_cache.get_cached_analysis("fin_old", phase=EventPhase.FINISHED)))
 
     def test_phase_none_uses_default_ttl(self):
         """No phase: uses default 2h TTL."""
@@ -108,7 +113,7 @@ class AnalysisCacheTests(unittest.TestCase):
             "result": result,
             "ts": datetime.now(tz=timezone.utc) - timedelta(hours=1, minutes=59),
         }
-        self.assertEqual(analysis_cache.get_cached_analysis("def_key"), result)
+        self.assertEqual(run_async(analysis_cache.get_cached_analysis("def_key")), result)
 
     # --- Cleanup test ---
 
@@ -121,7 +126,7 @@ class AnalysisCacheTests(unittest.TestCase):
             "result": {"text": "old"},
             "ts": datetime.now(tz=timezone.utc) - timedelta(hours=49),
         }
-        removed = analysis_cache.cleanup_expired_cache()
+        removed = run_async(analysis_cache.cleanup_expired_cache())
         self.assertEqual(removed, 1)
         self.assertIn("fresh", analysis_cache._analysis_cache)
         self.assertNotIn("old", analysis_cache._analysis_cache)

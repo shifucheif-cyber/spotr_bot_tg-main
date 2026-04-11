@@ -125,7 +125,7 @@ class TestMatchClarificationCache(unittest.TestCase):
             "result": {"status": "ok"},
             "ts": datetime.now(tz=timezone.utc),
         }
-        removed = cleanup_match_cache()
+        removed = asyncio.run(cleanup_match_cache())
         self.assertEqual(removed, 1)
         self.assertNotIn("old", match_finder._match_clarif_cache)
         self.assertIn("fresh", match_finder._match_clarif_cache)

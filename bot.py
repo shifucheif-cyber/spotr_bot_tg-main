@@ -1,4 +1,4 @@
-﻿import itertools
+import itertools
 import pytz
 from datetime import datetime, timedelta, timezone
 import os
@@ -33,6 +33,9 @@ from services.user_store import (
 from services.analysis_cache import analysis_cache_key, get_cached_analysis, put_cached_analysis
 from services.event_phase import EventPhase, get_event_phase, is_event_expired
 
+# --- load .env BEFORE reading env vars ---
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+
 # --- CONFIG ---
 ENABLE_PAYWALL = os.getenv("ENABLE_PAYWALL", "false").lower() in ("true", "1", "yes")
 _ANALYSIS_TIMEOUT = int(os.getenv("ANALYSIS_TIMEOUT", "300"))
@@ -56,8 +59,6 @@ def _sanitize_user_input(text: str, max_len: int = 100) -> str | None:
     return cleaned
 MAX_FREE_REQUESTS = int(os.getenv("MAX_FREE_REQUESTS", "3"))
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-
-load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 configure_console_output()
 configure_logging(default_level="WARNING")
@@ -366,7 +367,7 @@ async def _run_analysis(message: types.Message, user_id: int, data: dict, status
             return
         if phase is EventPhase.FINISHED:
             cache_key = analysis_cache_key(disc, match_name, ctx["date"])
-            cached_res = get_cached_analysis(cache_key, phase=phase)
+            cached_res = await get_cached_analysis(cache_key, phase=phase)
             if cached_res and cached_res.get("text"):
                 final = format_prediction_response(match_name, cached_res["text"])
                 for part in split_long_message(f"⚠️ Событие завершено. Последний доступный анализ:\n\n{final}"):
@@ -377,7 +378,7 @@ async def _run_analysis(message: types.Message, user_id: int, data: dict, status
 
         # --- LLM cache check ---
         cache_key = analysis_cache_key(disc, match_name, ctx["date"])
-        cached_res = get_cached_analysis(cache_key, phase=phase)
+        cached_res = await get_cached_analysis(cache_key, phase=phase)
         if cached_res:
             logger.info("Analysis cache HIT for %s", match_name)
             res = cached_res
@@ -386,7 +387,7 @@ async def _run_analysis(message: types.Message, user_id: int, data: dict, status
             full_prompt = payload
             res = await generate_content_with_metadata(full_prompt, disc, data.get('discipline_key'))
             if res.get("text"):
-                put_cached_analysis(cache_key, res)
+                await put_cached_analysis(cache_key, res)
 
         if res.get("text"):
             await record_analysis_result(user_id, discipline=disc, match_text=match_name, success=True)
@@ -433,11 +434,15 @@ async def start_analysis(message: types.Message, state: FSMContext, *, user_id: 
     status = await message.answer("🔎 Анализирую...")
 
     async def _guarded_analysis():
-        async with sem:
-            await asyncio.wait_for(
-                _run_analysis(message, user_id, data, status),
-                timeout=_ANALYSIS_TIMEOUT,
-            )
+        try:
+            async with sem:
+                await asyncio.wait_for(
+                    _run_analysis(message, user_id, data, status),
+                    timeout=_ANALYSIS_TIMEOUT,
+                )
+        finally:
+            if not sem.locked():
+                _user_semaphores.pop(user_id, None)
 
     asyncio.create_task(_guarded_analysis())
 
@@ -450,7 +455,7 @@ async def _periodic_cache_cleanup():
             from services.data_fetcher import cleanup_expired_cache as _cleanup_data
             from services.external_source import cleanup_team_cache as _cleanup_teams
             from services.match_finder import cleanup_match_cache as _cleanup_matches
-            total = _cleanup_analysis() + _cleanup_data() + _cleanup_teams() + _cleanup_matches()
+            total = await _cleanup_analysis() + await _cleanup_data() + await _cleanup_teams() + await _cleanup_matches()
             if total:
                 logger.info("Periodic cache cleanup: removed %d entries total", total)
         except Exception as e:

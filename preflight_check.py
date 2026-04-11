@@ -83,11 +83,9 @@ def run_preflight(quiet: bool = False) -> tuple[str, list[str]]:
         errors.append(f"FAIL: bootstrap LLM-клиентов упал: {e}")
 
     # 6. PostgreSQL: DATABASE_URL обязателен
-    db_backend = os.getenv("DB_BACKEND", "postgres").lower()
-    if db_backend == "postgres":
-        db_url = os.getenv("DATABASE_URL", "")
-        if not db_url or db_url.startswith("your_"):
-            errors.append("FAIL: DATABASE_URL не задан для PostgreSQL (установите DB_BACKEND=sqlite для локальной разработки)")
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url or db_url.startswith("your_"):
+        errors.append("FAIL: DATABASE_URL не задан (PostgreSQL обязателен)")
 
     # --- итого ---
     if errors:

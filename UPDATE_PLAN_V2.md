@@ -44,12 +44,18 @@
 - Автоматический выбор самого быстрого провайдера (вместо round-robin)
 - Dashboard метрик (hit rate кэша, latency, error rate)
 
-## 7. threading.Lock → asyncio.Lock (user_store)
+## 7. ~~threading.Lock → asyncio.Lock (user_store)~~ — НЕАКТУАЛЬНО
 
-- Заменить threading.Lock на asyncio.Lock для корректной работы в асинхронном контексте
-- Проверить все concurrent-доступы к shared state
+- user_store.py переведён на asyncpg (async pool), threading.Lock больше не используется
+- asyncpg.Pool потокобезопасен, дополнительная синхронизация не нужна
 
-## 8. Атомарный суточный лимит
+## 8. Интеграция hltv/sportsipy как первого контура сбора данных
+
+- hltv (CS2), sportsipy (остальные дисциплины) — первый источник данных об участниках
+- Пайплайн: спецбиблиотеки → DDG-валидация → Serper (min+max) → Tavily/Exa (если min не собран) → ВСЕ данные в LLM
+- Пакеты уже в requirements.txt, интеграция в search_engine — TODO
+
+## 9. Атомарный суточный лимит
 
 - Перенести проверку и инкремент daily limit в одну SQL-транзакцию
 - Исключить race condition при параллельных запросах
@@ -58,7 +64,7 @@
 
 ## ✅ Реализовано (справка)
 
-- asyncpg для user_store.py (полностью async, PostgreSQL + SQLite dual-backend)
+- asyncpg для user_store.py (полностью async, PostgreSQL-only)
 - Разделение search_engine.py → search_providers/ (config, helpers, providers)
 - Round-robin LLM балансировка (itertools.count + циклический сдвиг)
 - Telegram-таймауты (asyncio.create_task для тяжёлых запросов)

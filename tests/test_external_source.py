@@ -141,7 +141,7 @@ class TestTeamIdCache(unittest.TestCase):
             "result": "456",
             "ts": datetime.now(tz=timezone.utc),
         }
-        removed = external_source.cleanup_team_cache()
+        removed = run_async(external_source.cleanup_team_cache())
         self.assertEqual(removed, 1)
         self.assertNotIn("old", external_source._team_id_cache)
         self.assertIn("fresh", external_source._team_id_cache)

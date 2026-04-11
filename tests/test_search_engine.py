@@ -1,6 +1,8 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 
 from services import search_engine
 
@@ -45,7 +47,7 @@ class SearchEngineTests(unittest.TestCase):
         with patch.object(search_engine, "DDGS", object()), \
              patch.object(search_engine, "search_with_ddgs", new=AsyncMock(return_value=ddg_results)), \
              patch.object(search_engine, "search_with_serper", new=AsyncMock(return_value=[])) as mocked_serper, \
-             patch.object(search_engine, "_fetch_page_excerpt", return_value=""):
+             patch.object(search_engine, "_fetch_page_excerpt_async", new=AsyncMock(return_value="")):
             report = run_async(search_engine.collect_validated_sources(
                 "Real Madrid",
                 "football",
@@ -71,7 +73,7 @@ class SearchEngineTests(unittest.TestCase):
         with patch.object(search_engine, "DDGS", object()), \
              patch.object(search_engine, "search_with_ddgs", new=AsyncMock(return_value=[])), \
              patch.object(search_engine, "search_with_serper", new=AsyncMock(return_value=serper_results)) as mocked_serper, \
-             patch.object(search_engine, "_fetch_page_excerpt", return_value=""):
+             patch.object(search_engine, "_fetch_page_excerpt_async", new=AsyncMock(return_value="")):
             report = run_async(search_engine.collect_validated_sources(
                 "CSKA",
                 "hockey",
@@ -123,6 +125,37 @@ class CheckRequiredDataTests(unittest.TestCase):
         text = "HEAD TO HEAD statistics H2H INJURIES suspended"
         result = search_engine.check_required_data(text, ["h2h", "injuries"], "football")
         self.assertTrue(result["satisfied"])
+
+
+class TestSerperBackoff(unittest.TestCase):
+    """Exponential backoff on 429 for search_with_serper."""
+
+    @patch("services.search_providers.providers.SERPER_API_KEY", "fake-key")
+    @patch("services.search_providers.providers.asyncio.sleep", new_callable=AsyncMock)
+    @patch("services.search_providers.providers.httpx.AsyncClient")
+    def test_retries_on_429_with_exponential_delay(self, mock_client_cls, mock_sleep):
+        from services.search_providers.providers import search_with_serper
+
+        mock_resp_429 = MagicMock()
+        mock_resp_429.status_code = 429
+        mock_resp_429.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "429", request=MagicMock(), response=mock_resp_429
+        )
+
+        mock_resp_ok = MagicMock()
+        mock_resp_ok.status_code = 200
+        mock_resp_ok.raise_for_status = MagicMock()
+        mock_resp_ok.json.return_value = {"organic": [{"title": "T", "snippet": "S", "link": "https://x.com"}]}
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=[mock_resp_429, mock_resp_ok])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        result = run_async(search_with_serper("test query"))
+        self.assertEqual(len(result), 1)
+        mock_sleep.assert_awaited_once_with(1)  # 2^0 = 1
 
 
 if __name__ == "__main__":

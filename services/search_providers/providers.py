@@ -25,33 +25,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# --- Sync executor for legacy bridge ---
-_sync_executor = None
-
-
-def _get_sync_executor():
-    global _sync_executor
-    if _sync_executor is None:
-        import concurrent.futures
-        _sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-    return _sync_executor
-
-
-def _fetch_page_excerpt(url: str, entity: str) -> str:
-    """Синхронная обёртка для совместимости с legacy collect_validated_sources."""
-    try:
-        asyncio.get_running_loop()
-        return _get_sync_executor().submit(asyncio.run, _fetch_page_excerpt_async(url, entity)).result()
-    except RuntimeError:
-        try:
-            return asyncio.run(_fetch_page_excerpt_async(url, entity))
-        except Exception as exc:
-            logger.debug("Page fetch failed for %s: %s", url, exc)
-            return ""
-    except Exception as exc:
-        logger.debug("Page fetch failed for %s: %s", url, exc)
-        return ""
-
 
 async def _fetch_page_excerpt_async(url: str, entity: str, max_chars: int = 2000) -> str:
     """Асинхронно скачивает страницу и извлекает текстовый фрагмент (до max_chars)."""
@@ -117,7 +90,7 @@ async def search_with_serper(query: str, num_results: int = 5) -> List[Dict[str,
     """Асинхронный Google search через Serper.dev API (httpx)."""
     if not SERPER_API_KEY:
         return []
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                 response = await client.post(
@@ -146,9 +119,10 @@ async def search_with_serper(query: str, num_results: int = 5) -> List[Dict[str,
                 logger.info("Serper: %d results for: %s", len(results), query)
                 return results
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429 and attempt == 0:
-                logger.warning(f"Serper 429 Rate Limit, retrying after 1s for '{query}'")
-                await asyncio.sleep(1)
+            if exc.response.status_code == 429 and attempt < 2:
+                delay = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning("Serper 429 Rate Limit, retrying after %ds for '%s'", delay, query)
+                await asyncio.sleep(delay)
                 continue
             if exc.response.status_code in (404, 429):
                 logger.warning(f"Serper HTTP error {exc.response.status_code} for '{query}'")
@@ -174,7 +148,7 @@ async def _search_with_exa(query: str, include_domains: List[str], num_results: 
     }
     if include_domains:
         payload["includeDomains"] = include_domains
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                 response = await client.post(
@@ -189,9 +163,10 @@ async def _search_with_exa(query: str, include_domains: List[str], num_results: 
                 data = response.json()
                 break
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429 and attempt == 0:
-                logger.warning(f"Exa 429 Rate Limit, retrying after 1s for '{query}'")
-                await asyncio.sleep(1)
+            if exc.response.status_code == 429 and attempt < 2:
+                delay = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning("Exa 429 Rate Limit, retrying after %ds for '%s'", delay, query)
+                await asyncio.sleep(delay)
                 continue
             if exc.response.status_code in (404, 429):
                 logger.warning(f"Exa HTTP error {exc.response.status_code} for '{query}'")

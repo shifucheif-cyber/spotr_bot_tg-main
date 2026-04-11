@@ -12,6 +12,7 @@ class TestRunPreflight(unittest.TestCase):
         "SAMBANOVA_API_KEY": "",
         "GOOGLE_API_KEY": "",
         "DEEPSEEK_API_KEY": "",
+        "DATABASE_URL": "postgresql://test:test@localhost:5432/test",
     }, clear=False)
     @patch("preflight_check.Path.exists", return_value=True)
     @patch("preflight_check.importlib.import_module")
@@ -55,6 +56,7 @@ class TestRunPreflight(unittest.TestCase):
         "SAMBANOVA_API_KEY": "",
         "GOOGLE_API_KEY": "",
         "DEEPSEEK_API_KEY": "",
+        "DATABASE_URL": "postgresql://test:test@localhost:5432/test",
     }, clear=False)
     @patch("preflight_check.Path.exists", return_value=True)
     @patch("preflight_check.importlib.import_module")
